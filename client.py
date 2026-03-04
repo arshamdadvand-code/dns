@@ -168,6 +168,7 @@ class MasterDnsVPNClient:
         dynamic_data = f"P{int(time.time() % 60)}R{random.randint(100, 999)}".encode()
 
         try:
+            self.balancer.report_send(f"{server['resolver']}:{server['domain']}")
             query_packets = await self.dns_packet_parser.build_request_dns_query(
                 domain=server["domain"],
                 session_id=self.session_id,
@@ -190,7 +191,7 @@ class MasterDnsVPNClient:
             self.logger.debug(f"Failed to send PING: {e}")
 
     async def _process_received_packet(
-        self, response_bytes: bytes
+        self, response_bytes: bytes, addr=None
     ) -> Tuple[Optional[dict], bytes]:
         """
         Parse raw DNS response, extract VPN header, and return packet type alongside assembled data.
@@ -200,6 +201,17 @@ class MasterDnsVPNClient:
             return None, b""
 
         parsed = await self.dns_packet_parser.parse_dns_packet(response_bytes)
+        if addr and parsed and parsed.get("questions"):
+            try:
+                qname = parsed["questions"][0].get("qName", "").lower()
+                base_domain = next(
+                    (d for d in self.domains if qname.endswith(d.lower())), None
+                )
+                if base_domain:
+                    self.balancer.report_success(f"{addr[0]}:{base_domain}")
+            except Exception as _:
+                pass
+
         if not parsed or not parsed.get("answers"):
             self.logger.debug(
                 "<yellow>[PARSER]</yellow> DNS response contains no answers."
@@ -876,16 +888,16 @@ class MasterDnsVPNClient:
                 self.logger.debug(
                     f"<magenta>[RX]</magenta> Data from tunnel socket: {len(data)} bytes"
                 )
-                self.loop.create_task(self._process_and_route_incoming(data))
+                self.loop.create_task(self._process_and_route_incoming(data, addr))
 
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
                 self.logger.debug(f"RX Worker error: {e}")
 
-    async def _process_and_route_incoming(self, data):
+    async def _process_and_route_incoming(self, data, addr):
         """Helper to process incoming data asynchronously."""
-        parsed_header, returned_data = await self._process_received_packet(data)
+        parsed_header, returned_data = await self._process_received_packet(data, addr)
         if parsed_header:
             await self._handle_server_response(parsed_header, returned_data)
 
@@ -1019,6 +1031,7 @@ class MasterDnsVPNClient:
                 return
 
             for conn in target_conns:
+                self.balancer.report_send(f"{conn['resolver']}:{conn['domain']}")
                 query_packets = await self.dns_packet_parser.build_request_dns_query(
                     domain=conn["domain"],
                     session_id=self.session_id,
