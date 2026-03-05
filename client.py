@@ -511,7 +511,7 @@ class MasterDnsVPNClient:
                 self.min_upload_mtu > 0 and up_mtu_bytes < self.min_upload_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Upload MTU failed. (<cyan>{server_id}/{total_conns}</cyan>)</red>"
+                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Upload MTU failed. <yellow>({server_id}/{total_conns})</yellow></red>"
                 )
                 continue
 
@@ -524,7 +524,7 @@ class MasterDnsVPNClient:
                 self.min_download_mtu > 0 and down_mtu_bytes < self.min_download_mtu
             ):
                 self.logger.warning(
-                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Download MTU failed. (<cyan>{server_id}/{total_conns}</cyan>)</red>"
+                    f"<red>❌ Connection invalid for <yellow>{domain}</yellow> via <yellow>{resolver}</yellow>: Download MTU failed. <yellow>({server_id}/{total_conns})</yellow></red>"
                 )
                 continue
 
@@ -537,7 +537,7 @@ class MasterDnsVPNClient:
 
             self.logger.info(
                 f"<cyan>✅ Valid: {domain} via <green>{resolver}</green> | "
-                f"Upload MTU: <red>{up_mtu_bytes}</red> | Download MTU: <red>{down_mtu_bytes}</red> (<yellow>{server_id}/{total_conns}</yellow>)</cyan>"
+                f"Upload MTU: <red>{up_mtu_bytes}</red> | Download MTU: <red>{down_mtu_bytes}</red> <yellow>({server_id}/{total_conns})</yellow></cyan>"
             )
 
         valid_conns = [c for c in self.connections_map if c.get("is_valid")]
@@ -733,10 +733,12 @@ class MasterDnsVPNClient:
     async def run_client(self) -> None:
         """Run the MasterDnsVPN Client main logic."""
         self.logger.info("Setting up connections...")
+        all_resolvers = 0
         try:
             self.session_restart_event = asyncio.Event()
             if not self.success_mtu_checks or len(self.connections_map) <= 0:
                 await self.create_connection_map()
+                all_resolvers = len(self.connections_map)
 
                 if not await self.test_mtu_sizes():
                     self.logger.error("No valid servers found to connect.")
@@ -764,10 +766,74 @@ class MasterDnsVPNClient:
                     c["download_mtu_bytes"] for c in valid_conns
                 )
 
-                self.logger.info(
-                    f"<green>Synced Global MTU -> UP: {self.synced_upload_mtu}B, DOWN: {self.synced_download_mtu}B</green>"
+                max_founded_upload_mtu = max(c["upload_mtu_bytes"] for c in valid_conns)
+                max_founded_download_mtu = max(
+                    c["download_mtu_bytes"] for c in valid_conns
                 )
 
+                self.logger.success("<green>MTU Testing Completed!</green>")
+                self.logger.info("=" * 80)
+                self.logger.success(
+                    f"Total valid resolvers after MTU testing: <cyan>{len(self.balancer.valid_servers)}</cyan> of <cyan>{all_resolvers}</cyan>"
+                )
+
+                self.logger.info("=" * 80)
+                self.logger.info(
+                    f"<cyan>[MTU RESULTS]</cyan> Max Upload MTU found: <yellow>{max_founded_upload_mtu}</yellow> | Max Download MTU found: <yellow>{max_founded_download_mtu}</yellow>"
+                )
+                self.logger.info(
+                    f"<cyan>[MTU RESULTS]</cyan> Selected Synced Upload MTU: <yellow>{self.synced_upload_mtu}</yellow> | Selected Synced Download MTU: <yellow>{self.synced_download_mtu}</yellow>"
+                )
+
+                self.logger.info(
+                    "<cyan>[EXPLANATION]</cyan> Max MTU values represent the best performance potential across all valid resolvers, while synced MTU values ensure compatibility with all resolvers by using the lowest common denominator."
+                )
+                self.logger.info(
+                    "<cyan>[EXPLANATION]</cyan> Synced MTU = minimum MTU across all valid resolvers (ensures compatibility with all)"
+                )
+
+                self.logger.warning(
+                    "<yellow>[OPTION 1 - RECOMMENDED]</yellow> <cyan>For Maximum Performance:</cyan>"
+                )
+                self.logger.warning(
+                    f"<yellow>  • Set <cyan>MIN_UPLOAD_MTU</cyan> and <cyan>MAX_UPLOAD_MTU</cyan> = <green>{max_founded_upload_mtu}</green></yellow>"
+                )
+                self.logger.warning(
+                    f"<yellow>  • Set <cyan>MIN_DOWNLOAD_MTU</cyan> and <cyan>MAX_DOWNLOAD_MTU</cyan> = <green>{max_founded_download_mtu}</green></yellow>"
+                )
+                self.logger.warning(
+                    "<yellow>  • Effect: Skips binary search, tests only with maximum MTU size directly</yellow>"
+                )
+                self.logger.warning(
+                    "<yellow>  • Trade-off: May exclude slower resolvers, but better performance on compatible ones</yellow>"
+                )
+                self.logger.warning(
+                    "<yellow>  • Best for: Users with many resolvers or prioritizing speed over compatibility</yellow>"
+                )
+
+                self.logger.warning(
+                    "<yellow>[OPTION 2 - BALANCED]</yellow> <cyan>For Compatibility:</cyan>"
+                )
+                self.logger.warning(
+                    f"<yellow>  • Set <cyan>MIN_UPLOAD_MTU</cyan> = <green>{self.synced_upload_mtu}</green> | <cyan>MAX_UPLOAD_MTU</cyan> = <green>{max_founded_upload_mtu}</green></yellow>"
+                )
+                self.logger.warning(
+                    f"<yellow>  • Set <cyan>MIN_DOWNLOAD_MTU</cyan> = <green>{self.synced_download_mtu}</green> | <cyan>MAX_DOWNLOAD_MTU</cyan> = <green>{max_founded_download_mtu}</green></yellow>"
+                )
+                self.logger.warning(
+                    "<yellow>  • Effect: Tests MTU sizes between synced and maximum values</yellow>"
+                )
+                self.logger.warning(
+                    "<yellow>  • Trade-off: Keeps all valid resolvers but uses lower MTU (less performance than Option 1)</yellow>"
+                )
+                self.logger.warning(
+                    "<yellow>  • Best for: Users wanting to keep all resolvers while improving test speed</yellow>"
+                )
+
+                self.logger.info("=" * 80)
+                self.logger.info(
+                    f"<green>Global MTU Configuration -> Upload: <cyan>{self.synced_upload_mtu}B</cyan>, Download: <cyan>{self.synced_download_mtu}B</cyan></green>"
+                )
                 self.success_mtu_checks = True
 
             selected_conn = self.balancer.get_best_server()
@@ -779,7 +845,7 @@ class MasterDnsVPNClient:
                 return
 
             self.logger.success(
-                f"<g>Session Established! Session ID: {self.session_id}</g>"
+                f"<green>Session Established! Session ID: <cyan>{self.session_id}</cyan></green>"
             )
 
             if not await self._sync_mtu_with_server():
