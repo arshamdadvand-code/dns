@@ -77,7 +77,7 @@ You can install and run this project using two methods: the fast, pre-compiled a
 If you want to set up the server on a Linux machine, the easiest way is using the automated installation script. Simply run the following command in your server's terminal:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh | sudo bash
+bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh)
 ```
 
 This command downloads a script from GitHub and automatically handles the entire installation and configuration process. Once finished, the server will start, and an **Encryption Key** will be displayed in the terminal logs. Make sure to copy this key (it is also saved in `encrypt_key.txt` next to the server executable for convenience), as you will need it to connect the client.
