@@ -288,21 +288,27 @@ class MasterDnsVPNClient:
         if detected_packet_type is None or final_parsed_header is None:
             return None, b""
 
-        if len(chunks) == 1:
-            assembled_data_str = (
-                chunks[0] if 0 in chunks else next(iter(chunks.values()))
-            )
-        else:
-            parts = []
-            _append = parts.append
-            for i in range(len(chunks)):
-                if i in chunks:
-                    _append(chunks[i])
-            assembled_data_str = "".join(parts)
+        if not chunks:
+            return final_parsed_header, b""
+
+        chunk_ids = sorted(chunks.keys())
+
+        if chunk_ids[0] != 0:
+            return None, b""
+
+        expected_chunk_count = chunk_ids[-1] + 1
+        if len(chunks) != expected_chunk_count:
+            return None, b""
+
+        assembled_data_str = "".join(chunks[i] for i in range(expected_chunk_count))
 
         decoded_data = self.dns_parser.decode_and_decrypt_data(
             assembled_data_str, lowerCaseOnly=False
         )
+
+        if not decoded_data and assembled_data_str:
+            return None, b""
+
         return final_parsed_header, decoded_data
 
     # ---------------------------------------------------------
@@ -1659,17 +1665,6 @@ class MasterDnsVPNClient:
                 # Format:  [ATYP] [ADDR_BYTES] [PORT_BYTES]
                 target_payload = bytes([atyp]) + target_addr_bytes + target_port_bytes
 
-                # Send SOCKS5 Success Reply
-                reply = b"\x05\x00\x00"  # VER, REP=0(success), RSV
-                if atyp == 0x01:  # IPv4
-                    reply += b"\x01" + target_addr_bytes + target_port_bytes
-                elif atyp == 0x03:  # Domain
-                    reply += b"\x03" + target_addr_bytes + target_port_bytes
-                elif atyp == 0x04:  # IPv6
-                    reply += b"\x04" + target_addr_bytes + target_port_bytes
-                writer.write(reply)
-                await writer.drain()
-
             except Exception as e:
                 self.logger.debug(f"SOCKS5 Handshake error: {e}")
                 await self._close_writer_safely(writer)
@@ -1721,7 +1716,54 @@ class MasterDnsVPNClient:
             )
             self.tx_event.set()
         else:
+            self.active_streams[stream_id]["handshake_event"] = asyncio.Event()
+
             await self._stream_syn_handler(stream_id, target_payload, reader, writer)
+
+            try:
+                await asyncio.wait_for(
+                    self.active_streams[stream_id]["handshake_event"].wait(),
+                    timeout=60.0,
+                )  # بعدا یادم باشه اگه زودتر نشست کلاینت بسته شد اینو هم چک کنم دیگه صبر نکنه الکی!
+
+                if (
+                    stream_id in self.active_streams
+                    and self.active_streams[stream_id].get("status") == "ACTIVE"
+                ):
+                    reply = b"\x05\x00\x00"  # VER, REP=0(success), RSV
+                    if atyp == 0x01:
+                        reply += b"\x01" + target_addr_bytes + target_port_bytes
+                    elif atyp == 0x03:
+                        reply += b"\x03" + target_addr_bytes + target_port_bytes
+                    elif atyp == 0x04:
+                        reply += b"\x04" + target_addr_bytes + target_port_bytes
+
+                    writer.write(reply)
+                    await writer.drain()
+                else:
+                    raise ConnectionError("Stream closed before handshake completion.")
+
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    f"SOCKS5 Handshake timed out for stream {stream_id}"
+                )
+                try:
+                    writer.write(b"\x05\x04\x00\x01\x00\x00\x00\x00\x00\x00")
+                    await writer.drain()
+                except Exception:
+                    pass
+                await self.close_stream(stream_id, reason="SOCKS Target Timeout")
+
+            except Exception as e:
+                self.logger.debug(f"SOCKS Target Rejected by Server: {e}")
+                try:
+                    writer.write(b"\x05\x05\x00\x01\x00\x00\x00\x00\x00\x00")
+                    await writer.drain()
+                except Exception:
+                    pass
+                await self.close_stream(
+                    stream_id, reason="SOCKS Target Rejected by Server"
+                )
 
     async def _stream_syn_handler(
         self, stream_id: int, target_payload: bytes, reader, writer
@@ -2119,7 +2161,12 @@ class MasterDnsVPNClient:
                 stream_data.pop("stream_creating", None)
                 self._send_ping_packet()
         elif ptype == Packet_Type.SOCKS5_SYN_ACK and stream_id_exists:
-            stream_obj = self.active_streams[stream_id].get("stream")
+            stream_data = self.active_streams[stream_id]
+            stream_obj = stream_data.get("stream")
+
+            if "handshake_event" in stream_data:
+                stream_data["handshake_event"].set()
+
             if (
                 stream_obj
                 and hasattr(stream_obj, "socks_connected")
@@ -2175,7 +2222,12 @@ class MasterDnsVPNClient:
                     b_ptype == Packet_Type.SOCKS5_SYN_ACK
                     and b_stream_id in self.active_streams
                 ):
-                    stream_obj = self.active_streams[b_stream_id].get("stream")
+                    stream_data = self.active_streams[b_stream_id]
+                    stream_obj = stream_data.get("stream")
+
+                    if "handshake_event" in stream_data:
+                        stream_data["handshake_event"].set()
+
                     if (
                         stream_obj
                         and hasattr(stream_obj, "socks_connected")

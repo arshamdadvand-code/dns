@@ -479,32 +479,40 @@ class MasterDnsVPNServer:
                     )
 
                     chunks = stream_data["socks_chunks"]
+                    chunk_ids = sorted(chunks.keys())
 
-                    parts = []
-                    for i in range(len(chunks)):
-                        if i in chunks:
-                            parts.append(chunks[i])
-                        else:
-                            break
-                    assembled = b"".join(parts)
+                    if not chunk_ids or chunk_ids[0] != 0:
+                        return None
+
+                    expected_chunk_count = chunk_ids[-1] + 1
+                    if len(chunks) != expected_chunk_count:
+                        return None
+
+                    assembled = b"".join(chunks[i] for i in range(expected_chunk_count))
 
                     if len(assembled) >= 1:
                         atyp = assembled[0]
                         expected_len = -1
                         if atyp == 0x01:
-                            expected_len = 1 + 4 + 2  # IPv4
+                            expected_len = 1 + 4 + 2
                         elif atyp == 0x03 and len(assembled) >= 2:
-                            expected_len = 1 + 1 + assembled[1] + 2  # Domain
+                            expected_len = 1 + 1 + assembled[1] + 2
                         elif atyp == 0x04:
-                            expected_len = 1 + 16 + 2  # IPv6
+                            expected_len = 1 + 16 + 2
 
-                        if expected_len != -1 and len(assembled) >= expected_len:
+                        if expected_len != -1:
+                            if len(assembled) < expected_len:
+                                return None
+                            if len(assembled) > expected_len:
+                                assembled = assembled[:expected_len]
+
                             stream_data["status"] = "SOCKS_CONNECTING"
                             self.loop.create_task(
                                 self._process_socks5_target(
-                                    session_id, stream_id, assembled[:expected_len]
+                                    session_id, stream_id, assembled
                                 )
                             )
+
         elif packet_type == Packet_Type.STREAM_FIN:
             stream_data = streams.get(stream_id)
             if stream_data:

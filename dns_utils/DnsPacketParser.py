@@ -932,7 +932,7 @@ class DnsPacketParser:
             hb_len += 2
         if Packet_Type.STREAM_DATA in self._PT_FRAG_EXT:
             # frag byte + the special-case extra 3 bytes when seq==0 and frag==0
-            hb_len += 1 + 3
+            hb_len += 4
 
         # include marker byte added before base-encoding
         bits = (hb_len + 1) * 8
@@ -1110,17 +1110,13 @@ class DnsPacketParser:
 
         # FRAG: need 1 byte, and possibly extra 3 bytes when seq==0 and frag==0
         if ptype in PT_FRAG:
-            if ln < off + 1:
+            if ln < off + 4:
                 return None
+
             frag = hb[off]
             header_data["fragment_id"] = frag
-            off += 1
-
-            if header_data.get("sequence_num") == 0 and frag == 0:
-                if ln < off + 3:
-                    return None
-                header_data["total_fragments"] = hb[off]
-                header_data["total_data_length"] = (hb[off + 1] << 8) | hb[off + 2]
+            header_data["total_fragments"] = hb[off + 1]
+            header_data["total_data_length"] = (hb[off + 2] << 8) | hb[off + 3]
 
         return header_data
 
@@ -1186,10 +1182,13 @@ class DnsPacketParser:
 
         if packet_type in self._PT_FRAG_EXT:
             h_list.append(fragment_id)
-            if sequence_num == 0 and fragment_id == 0:
-                h_list.extend(
-                    [total_fragments, total_data_length >> 8, total_data_length & 0xFF]
-                )
+            h_list.extend(
+                [
+                    total_fragments & 0xFF,
+                    (total_data_length >> 8) & 0xFF,
+                    total_data_length & 0xFF,
+                ]
+            )
 
         raw_header = bytes(h_list)
 
