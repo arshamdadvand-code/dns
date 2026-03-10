@@ -132,6 +132,8 @@ class MasterDnsVPNServer:
         except Exception:
             self._valid_packet_types = set()
 
+        self._block_packer = struct.Struct(">BHH")
+
     # ---------------------------------------------------------
     # Session Management
     # ---------------------------------------------------------
@@ -507,16 +509,27 @@ class MasterDnsVPNServer:
             stream_data = streams.get(stream_id)
             if stream_data:
                 stream_data["fin_retries"] = 99
-            await self.close_stream(session_id, stream_id, reason="Client sent FIN")
+                arq = stream_data.get("arq_obj")
+                if arq and getattr(arq, "_fin_sent", False):
+                    real_reason = getattr(
+                        arq, "close_reason", "Local Target Closed Connection"
+                    )
+                    await self.close_stream(session_id, stream_id, reason=real_reason)
+                else:
+                    await self.close_stream(
+                        session_id, stream_id, reason="Client sent FIN"
+                    )
+            else:
+                await self.close_stream(session_id, stream_id, reason="Client sent FIN")
 
         elif packet_type == Packet_Type.PACKED_CONTROL_BLOCKS:
             extracted_data = self.dns_parser.extract_vpn_data_from_labels(labels)
             if extracted_data:
-                _unpack_from = struct.unpack_from
+                _unpack_from = self._block_packer.unpack_from
                 for i in range(0, len(extracted_data), 5):
                     if i + 5 > len(extracted_data):
                         break
-                    b_ptype, b_stream_id, b_sn = _unpack_from(">BHH", extracted_data, i)
+                    b_ptype, b_stream_id, b_sn = _unpack_from(extracted_data, i)
                     if b_ptype == Packet_Type.STREAM_DATA_ACK:
                         stream_data = streams.get(b_stream_id)
                         if stream_data and stream_data.get("status") == "CONNECTED":
@@ -536,10 +549,9 @@ class MasterDnsVPNServer:
 
         main_queue = session.get("main_queue")
 
-        active_streams = []
-        for sid in list(streams.keys()):
-            if streams[sid].get("tx_queue"):
-                active_streams.append(sid)
+        active_streams = [
+            sid for sid, sdata in streams.items() if sdata.get("tx_queue")
+        ]
 
         if active_streams:
             num_active = len(active_streams)
@@ -615,12 +627,10 @@ class MasterDnsVPNServer:
 
             if (
                 res_ptype in (Packet_Type.STREAM_DATA_ACK, Packet_Type.SOCKS5_SYN_ACK)
-                and session.get("max_packed_blocks", 1) > 1
+                and session["max_packed_blocks"] > 1
             ):
-                _pack = struct.pack
-                packed_buffer = bytearray(
-                    _pack(">BHH", res_ptype, res_stream_id, res_sn)
-                )
+                _pack = self._block_packer.pack
+                packed_buffer = bytearray(_pack(res_ptype, res_stream_id, res_sn))
                 blocks = 1
                 max_blocks = session["max_packed_blocks"]
 
@@ -651,7 +661,7 @@ class MasterDnsVPNServer:
                                     sdata["track_syn_ack"].discard(popped[2])
                                     sdata["count_syn_ack"] -= 1
                                 packed_buffer.extend(
-                                    _pack(">BHH", popped[2], popped[3], popped[4])
+                                    _pack(popped[2], popped[3], popped[4])
                                 )
                                 blocks += 1
                             else:
@@ -1333,19 +1343,13 @@ class MasterDnsVPNServer:
                                     session_id, 1, sid, 0, fin_data, is_fin=True
                                 )
 
-                    closed_ids = []
-                    for sid in list(streams.keys()):
-                        stream_data = streams.get(sid)
-                        if not stream_data:
-                            continue
-                        arq_obj = stream_data.get("arq_obj")
-                        if (
-                            arq_obj
-                            and getattr(arq_obj, "closed", False)
-                            and stream_data.get("status")
-                            not in ("TIME_WAIT", "CLOSING")
-                        ):
-                            closed_ids.append(sid)
+                    closed_ids = [
+                        sid
+                        for sid, sdata in streams.items()
+                        if sdata.get("arq_obj")
+                        and getattr(sdata["arq_obj"], "closed", False)
+                        and sdata.get("status") not in ("TIME_WAIT", "CLOSING")
+                    ]
 
                     for sid in closed_ids:
                         try:
@@ -1354,7 +1358,6 @@ class MasterDnsVPNServer:
                             real_reason = getattr(
                                 arq_obj, "close_reason", "Unknown ARQ Error"
                             )
-
                             await self.close_stream(
                                 session_id,
                                 sid,

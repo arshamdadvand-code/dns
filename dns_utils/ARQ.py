@@ -259,11 +259,7 @@ class ARQ:
         items_to_resend = []
         _append = items_to_resend.append
 
-        for sn in list(self.snd_buf.keys()):
-            info = self.snd_buf.get(sn)
-            if not info:
-                continue
-
+        for sn, info in self.snd_buf.items():
             if now - info["time"] >= info["current_rto"]:
                 _append((sn, info["data"], info.get("is_socks_syn", False)))
                 info["time"] = now

@@ -136,6 +136,8 @@ class MasterDnsVPNClient:
 
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
 
+        self._block_packer = struct.Struct(">BHH")
+
     # ---------------------------------------------------------
     # Connection Management
     # ---------------------------------------------------------
@@ -1869,12 +1871,9 @@ class MasterDnsVPNClient:
             is_main = False
             selected_stream_data = None
 
-            active_sids = []
-            _append = active_sids.append
-            for sid in list(self.active_streams.keys()):
-                s = self.active_streams.get(sid)
-                if s and s.get("tx_queue"):
-                    _append(sid)
+            active_sids = [
+                sid for sid, s in self.active_streams.items() if s.get("tx_queue")
+            ]
 
             if active_sids:
                 num_active = len(active_sids)
@@ -1949,10 +1948,10 @@ class MasterDnsVPNClient:
             if (
                 item
                 and item[2] == Packet_Type.STREAM_DATA_ACK
-                and getattr(self, "max_packed_blocks", 1) > 1
+                and self.max_packed_blocks > 1
             ):
-                _pack = struct.pack
-                packed_buffer = bytearray(_pack(">BHH", item[2], item[3], item[4]))
+                _pack = self._block_packer.pack
+                packed_buffer = bytearray(_pack(item[2], item[3], item[4]))
                 blocks = 1
                 max_blocks = self.max_packed_blocks
 
@@ -1962,12 +1961,7 @@ class MasterDnsVPNClient:
                         popped = heapq.heappop(mq)
                         self.track_ack.discard(popped[4])
                         self.count_ack -= 1
-                        packed_buffer.extend(
-                            _pack(">BHH", popped[2], popped[3], popped[4])
-                        )
-                        blocks += 1
-                    else:
-                        break
+                        packed_buffer.extend(_pack(popped[2], popped[3], popped[4]))
 
                 if blocks < max_blocks and active_sids:
                     start_idx = self.round_robin_index
@@ -1990,7 +1984,7 @@ class MasterDnsVPNClient:
                                     s_data["track_ack"].discard(popped[4])
                                     s_data["count_ack"] -= 1
                                     packed_buffer.extend(
-                                        _pack(">BHH", popped[2], popped[3], popped[4])
+                                        _pack(popped[2], popped[3], popped[4])
                                     )
                                     blocks += 1
                                 else:
@@ -2152,8 +2146,17 @@ class MasterDnsVPNClient:
             self._send_ping_packet()
         elif ptype == Packet_Type.STREAM_FIN and stream_id_exists:
             self._send_ping_packet()
-            self.active_streams[stream_id]["fin_retries"] = 99
-            await self.close_stream(stream_id, reason="Server sent FIN")
+            stream_data = self.active_streams[stream_id]
+            stream_data["fin_retries"] = 99
+
+            arq = stream_data.get("stream")
+            if arq and getattr(arq, "_fin_sent", False):
+                real_reason = getattr(
+                    arq, "close_reason", "Local App Closed Connection"
+                )
+                await self.close_stream(stream_id, reason=real_reason)
+            else:
+                await self.close_stream(stream_id, reason="Server sent FIN")
         elif ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
             _unpack_from = struct.unpack_from
             for i in range(0, len(data), 5):
