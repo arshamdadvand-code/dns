@@ -77,6 +77,7 @@ class ARQ:
         self.window_not_full = asyncio.Event()
         self.window_not_full.set()
         self._write_lock = asyncio.Lock()
+        self.state = "OPEN"  # OPEN, HALF_CLOSED_LOCAL, HALF_CLOSED_REMOTE, CLOSING, TIME_WAIT, RESET, CLOSED
 
         self.is_socks = is_socks
         self.initial_data = initial_data
@@ -166,7 +167,7 @@ class ARQ:
 
                 self.snd_buf[sn] = {
                     "data": raw_data,
-                    "time": self.last_activity,,
+                    "time": self.last_activity,
                     "create_time": _monotonic(),
                     "retries": 0,
                     "current_rto": self.rto,
