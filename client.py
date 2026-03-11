@@ -266,43 +266,73 @@ class MasterDnsVPNClient:
             )
             return 0
 
+        low = max(min_mtu, min_allowed)
+        high = max_mtu
+
+        if low > high:
+            self.logger.debug(
+                f"<cyan>[MTU]</cyan> Invalid MTU range: low={low}, high={high}. Skipping."
+            )
+            return 0
+
         self.logger.debug(
-            f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {min_allowed}-{max_mtu}"
+            f"<cyan>[MTU]</cyan> Starting binary search for MTU. Range: {low}-{high}"
         )
 
-        for attempt in range(self.mtu_test_retries):
-            if self.should_stop.is_set():
-                return 0
-            if await test_callable(max_mtu, is_retry=(attempt > 0)):
-                self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {max_mtu} is valid.")
-                return max_mtu
+        tested_cache = {}
 
-        low = max(min_mtu, min_allowed)
-        high = max_mtu - 1
-        optimal = 0
+        async def check_mtu(value: int) -> bool:
+            if value in tested_cache:
+                return tested_cache[value]
 
-        while low <= high:
-            if self.should_stop.is_set():
-                return 0
-
-            mid = (low + high) // 2
             ok = False
-
             for attempt in range(self.mtu_test_retries):
                 if self.should_stop.is_set():
-                    return 0
+                    tested_cache[value] = False
+                    return False
+
                 try:
-                    if await test_callable(mid, is_retry=(attempt > 0)):
+                    if await test_callable(value, is_retry=(attempt > 0)):
                         ok = True
                         break
                 except Exception as e:
-                    self.logger.debug(f"MTU test callable raised: {e}")
+                    self.logger.debug(f"MTU test callable raised for {value}: {e}")
+
+            tested_cache[value] = ok
+            return ok
+
+        if await check_mtu(high):
+            self.logger.debug(f"<cyan>[MTU]</cyan> Max MTU {high} is valid.")
+            return high
+
+        if low == high:
+            self.logger.debug(
+                f"<cyan>[MTU]</cyan> Only one MTU candidate ({low}) existed and it failed."
+            )
+            return 0
+
+        if not await check_mtu(low):
+            self.logger.debug(
+                f"<cyan>[MTU]</cyan> Both boundary MTUs failed (min={low}, max={high}). Skipping middle checks."
+            )
+            return 0
+
+        optimal = low
+        left = low + 1
+        right = high - 1
+
+        while left <= right:
+            if self.should_stop.is_set():
+                return 0
+
+            mid = (left + right) // 2
+            ok = await check_mtu(mid)
 
             if ok:
                 optimal = mid
-                low = mid + 1
+                left = mid + 1
             else:
-                high = mid - 1
+                right = mid - 1
 
         self.logger.debug(f"<cyan>[MTU]</cyan> Binary search result: {optimal}")
         return optimal
