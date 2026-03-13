@@ -1743,6 +1743,8 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     self.next_inactive_recheck_at = (
                         now + self.recheck_inactive_interval_seconds
                     )
+
+                    await self._sleep(min(2.0, self.recheck_server_interval_seconds))
                     continue
 
                 for conn in inactive_conns:
@@ -2224,7 +2226,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     self._handle_local_tcp_connection,
                     listen_ip,
                     listen_port,
-                    reuse_address=True,
+                    reuse_address=False,
                 )
             else:
                 server = await asyncio.start_server(
@@ -2235,18 +2237,32 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     reuse_port=True,
                 )
 
+            try:
+                bound_addrs = []
+                for sock in server.sockets or []:
+                    try:
+                        bound_addrs.append(str(sock.getsockname()))
+                    except Exception:
+                        pass
+                if bound_addrs:
+                    self.logger.info(
+                        f"<cyan>Local listener sockets: {', '.join(bound_addrs)}</cyan>"
+                    )
+            except Exception:
+                pass
+
             if self.protocol_type == "SOCKS5":
                 if self.config.get("SOCKS5_USER") and self.config.get("SOCKS5_PASS"):
                     self.logger.info(
-                        f"<green>SOCKS5 Proxy started on {listen_port} with Authentication. Username: <cyan>{self.config.get('SOCKS5_USER')}</cyan></green>"
+                        f"<green>SOCKS5 Proxy started on <cyan>{listen_port}</cyan> with Authentication. Username: <red>{self.config.get('SOCKS5_USER')}</red></green>"
                     )
                 else:
                     self.logger.info(
-                        f"<green>SOCKS5 Proxy started on {listen_port} without Authentication.</green>"
+                        f"<green>SOCKS5 Proxy started on <cyan>{listen_port}</cyan> without Authentication.</green>"
                     )
             else:
                 self.logger.info(
-                    f"<green>TCP Proxy started on {listen_port} (Protocol: {self.protocol_type})</green>"
+                    f"<green>TCP Proxy started on <cyan>{listen_port}</cyan> (Protocol: <cyan>{self.protocol_type}</cyan>)</green>"
                 )
 
             self.workers = []
