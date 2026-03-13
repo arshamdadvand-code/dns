@@ -66,6 +66,10 @@ jobs:
           pip install -r requirements.txt
           pip check
 
+      - name: Install docs converter dependency
+        run: |
+          pip install markdown
+
       - name: Generate launcher entry files (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
         shell: powershell
@@ -327,6 +331,76 @@ jobs:
           cp client_resolvers.simple.txt dist/client_resolvers.txt || true
           cp server_config.toml.simple dist/server_config.toml || true
 
+      - name: Convert README files to HTML (client docs)
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import markdown
+
+          css = """
+          :root { color-scheme: light dark; }
+          body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+            line-height: 1.7;
+            background: #0b1020;
+            color: #e8eefc;
+          }
+          .wrap { max-width: 980px; margin: 0 auto; padding: 40px 24px 56px; }
+          h1,h2,h3 { line-height: 1.25; }
+          h1 { font-size: 2rem; margin-top: 0; }
+          a { color: #8ec5ff; }
+          pre, code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+          pre {
+            padding: 14px 16px; border-radius: 10px; overflow-x: auto;
+            background: #111a33; border: 1px solid #233154;
+          }
+          code { background: #15203f; padding: 0.12em 0.3em; border-radius: 6px; }
+          table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+          th, td { border: 1px solid #2a3963; padding: 8px 10px; text-align: left; }
+          blockquote {
+            margin: 16px 0; padding: 10px 14px;
+            border-left: 4px solid #5b84ff; background: #101735;
+          }
+          """
+
+          docs = [
+              ("README.md", "MasterDnsVPN Documentation", "README.html"),
+              ("README_FA.md", "MasterDnsVPN Documentation (FA)", "README_FA.html"),
+          ]
+
+          dist = Path("dist")
+          dist.mkdir(parents=True, exist_ok=True)
+
+          for src_name, title, out_name in docs:
+              src = Path(src_name)
+              if not src.exists():
+                  continue
+              md_text = src.read_text(encoding="utf-8", errors="ignore")
+              body = markdown.markdown(
+                  md_text,
+                  extensions=["fenced_code", "tables", "toc", "sane_lists"],
+                  output_format="html5",
+              )
+              html = f"""<!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8" />
+            <meta name="viewport" content="width=device-width, initial-scale=1" />
+            <title>{title}</title>
+            <style>{css}</style>
+          </head>
+          <body>
+            <main class="wrap">
+              {body}
+            </main>
+          </body>
+          </html>
+          """
+              (dist / out_name).write_text(html, encoding="utf-8")
+          PY
+
       - name: Package artifacts (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
         shell: powershell
@@ -356,6 +430,13 @@ jobs:
 
           Compress-Archive -Path $clientExeName,"client_config.toml","client_resolvers.txt" -DestinationPath "${clientZipBase}.zip" -Force
           Compress-Archive -Path $serverExeName,"server_config.toml" -DestinationPath "${serverZipBase}.zip" -Force
+
+          if (Test-Path "README.html") {
+            Compress-Archive -Path "README.html" -Update -DestinationPath "${clientZipBase}.zip"
+          }
+          if (Test-Path "README_FA.html") {
+            Compress-Archive -Path "README_FA.html" -Update -DestinationPath "${clientZipBase}.zip"
+          }
 
       - name: Package artifacts (non-Windows)
         if: ${{ matrix.os != 'windows-latest' }}
@@ -389,10 +470,16 @@ jobs:
 
           CLIENT_TOML="client_config.toml"
           CLIENT_RESOLVERS="client_resolvers.txt"
+          CLIENT_README_EN="README.html"
+          CLIENT_README_FA="README_FA.html"
           SERVER_TOML="server_config.toml"
 
-          zip -j "${CLIENT_ZIP}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" "${CLIENT_RESOLVERS}" || true
-          tar -czf "${CLIENT_TAR}" "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" "${CLIENT_RESOLVERS}" || true
+          CLIENT_FILES=( "${CLIENT_EXE_NAME}" "${CLIENT_TOML}" "${CLIENT_RESOLVERS}" )
+          [ -f "${CLIENT_README_EN}" ] && CLIENT_FILES+=( "${CLIENT_README_EN}" )
+          [ -f "${CLIENT_README_FA}" ] && CLIENT_FILES+=( "${CLIENT_README_FA}" )
+
+          zip -j "${CLIENT_ZIP}" "${CLIENT_FILES[@]}" || true
+          tar -czf "${CLIENT_TAR}" "${CLIENT_FILES[@]}" || true
           zip -j "${SERVER_ZIP}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
           tar -czf "${SERVER_TAR}" "${SERVER_EXE_NAME}" "${SERVER_TOML}" || true
 
