@@ -1,0 +1,24 @@
+# ==============================================================================
+# MasterDnsVPN
+# Author: MasterkinG32
+# Github: https://github.com/masterking32
+# Year: 2026
+# ==============================================================================
+
+# Transport protocol between client and server:
+# - "SOCKS5": optimized proxy mode
+# - "TCP": raw TCP tunnel mode
+PROTOCOL_TYPE = "SOCKS5"
+
+# Must match server DOMAIN values.
+DOMAINS = ["v.domain.com"]
+
+# Encryption method:
+# 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
+# Must match server DATA_ENCRYPTION_METHOD.
+DATA_ENCRYPTION_METHOD = 1
+
+# Shared secret key with server (required on client).
+ENCRYPTION_KEY = ""
+
+LOG_LEVEL = "INFO"
