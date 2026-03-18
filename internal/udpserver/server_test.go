@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	"masterdnsvpn-go/internal/config"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
@@ -170,6 +171,117 @@ func TestHandlePacketRespondsToMTUUpProbeBaseEncoded(t *testing.T) {
 	}
 }
 
+func TestHandlePacketCreatesAndReusesSessionInit(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	verifyCode := []byte{0x44, 0x33, 0x22, 0x11}
+	payload := []byte{
+		1,
+		0x21,
+		0x00, 0x96,
+		0x00, 0xC8,
+		verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3],
+	}
+
+	query1 := buildTunnelQueryWithSessionID(t, codec, "a.com", 0, ENUMS.PacketSessionInit, payload)
+	response1 := srv.handlePacket(query1)
+	if len(response1) == 0 {
+		t.Fatal("handlePacket should return a session accept response")
+	}
+
+	packet1, err := DnsParser.ExtractVPNResponse(response1, true)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if packet1.PacketType != ENUMS.PacketSessionAccept {
+		t.Fatalf("unexpected packet type: got=%d want=%d", packet1.PacketType, ENUMS.PacketSessionAccept)
+	}
+	if len(packet1.Payload) != 7 {
+		t.Fatalf("unexpected session payload len: got=%d want=7", len(packet1.Payload))
+	}
+	if !bytes.Equal(packet1.Payload[3:7], verifyCode) {
+		t.Fatalf("unexpected verify code: got=%v want=%v", packet1.Payload[3:7], verifyCode)
+	}
+
+	query2 := buildTunnelQueryWithSessionID(t, codec, "a.com", 0, ENUMS.PacketSessionInit, payload)
+	response2 := srv.handlePacket(query2)
+	packet2, err := DnsParser.ExtractVPNResponse(response2, true)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	if packet1.Payload[0] != packet2.Payload[0] {
+		t.Fatalf("expected reused session id: got=%d want=%d", packet2.Payload[0], packet1.Payload[0])
+	}
+	if packet1.Payload[1] != packet2.Payload[1] {
+		t.Fatalf("expected reused session cookie: got=%d want=%d", packet2.Payload[1], packet1.Payload[1])
+	}
+	if packet1.SessionID != 0 || packet2.SessionID != 0 {
+		t.Fatalf("session accept should stay in pre-session header space: got1=%d got2=%d", packet1.SessionID, packet2.SessionID)
+	}
+}
+
+func TestHandlePacketRejectsMalformedSessionInit(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11, 0x99}
+	query := buildTunnelQueryWithSessionID(t, codec, "a.com", 9, ENUMS.PacketSessionInit, payload)
+	if response := srv.handlePacket(query); len(response) != 0 {
+		t.Fatal("malformed session init must be rejected")
+	}
+}
+
+func TestSessionStoreExpiresReuseSignatureWithoutDroppingSession(t *testing.T) {
+	store := newSessionStore()
+	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
+
+	record, reused, err := store.findOrCreate(payload)
+	if err != nil {
+		t.Fatalf("findOrCreate returned error: %v", err)
+	}
+	if reused {
+		t.Fatal("first session init should not be reused")
+	}
+	if record == nil {
+		t.Fatal("findOrCreate returned nil record")
+	}
+
+	store.mu.Lock()
+	store.bySig[record.Signature] = record.ID
+	record.ReuseUntil = time.Now().Add(-time.Second)
+	store.mu.Unlock()
+
+	store.mu.Lock()
+	store.expireReuseLocked(time.Now())
+	if store.byID[record.ID] == nil {
+		store.mu.Unlock()
+		t.Fatal("expired reuse window must not remove active session record")
+	}
+	if _, ok := store.bySig[record.Signature]; ok {
+		store.mu.Unlock()
+		t.Fatal("expired reuse window should remove signature mapping")
+	}
+	store.mu.Unlock()
+}
+
 func buildServerTestQuery(id uint16, name string, qtype uint16) []byte {
 	qname := encodeServerTestName(name)
 	packet := make([]byte, 12+len(qname)+4)
@@ -199,10 +311,14 @@ func encodeServerTestName(name string) []byte {
 }
 
 func buildTunnelQuery(t *testing.T, codec *security.Codec, name string, packetType uint8, payload []byte) []byte {
+	return buildTunnelQueryWithSessionID(t, codec, name, 255, packetType, payload)
+}
+
+func buildTunnelQueryWithSessionID(t *testing.T, codec *security.Codec, name string, sessionID uint8, packetType uint8, payload []byte) []byte {
 	t.Helper()
 
 	encoded, err := VPNProto.BuildEncoded(VPNProto.BuildOptions{
-		SessionID:      255,
+		SessionID:      sessionID,
 		PacketType:     packetType,
 		StreamID:       1,
 		SequenceNum:    1,

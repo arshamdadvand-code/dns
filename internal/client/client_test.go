@@ -8,6 +8,7 @@
 package client
 
 import (
+	"encoding/binary"
 	"testing"
 
 	"masterdnsvpn-go/internal/config"
@@ -98,5 +99,41 @@ func TestSetConnectionValidityKeepsClientAndBalancerInSync(t *testing.T) {
 	}
 	if got := c.Balancer().ValidCount(); got != 1 {
 		t.Fatalf("unexpected valid count after enable: got=%d want=1", got)
+	}
+}
+
+func TestBuildSessionInitPayloadLayout(t *testing.T) {
+	c := New(config.ClientConfig{
+		BaseEncodeData:          true,
+		UploadCompressionType:   2,
+		DownloadCompressionType: 1,
+	}, nil, nil)
+	c.syncedUploadMTU = 150
+	c.syncedDownloadMTU = 200
+
+	payload, useBase64, verifyCode, err := c.buildSessionInitPayload()
+	if err != nil {
+		t.Fatalf("buildSessionInitPayload returned error: %v", err)
+	}
+	if !useBase64 {
+		t.Fatal("expected base64 response mode")
+	}
+	if len(payload) != 10 {
+		t.Fatalf("unexpected payload len: got=%d want=10", len(payload))
+	}
+	if payload[0] != 1 {
+		t.Fatalf("unexpected response mode byte: got=%d want=1", payload[0])
+	}
+	if payload[1] != 0x21 {
+		t.Fatalf("unexpected compression pair: got=%#x want=%#x", payload[1], 0x21)
+	}
+	if got := int(binary.BigEndian.Uint16(payload[2:4])); got != 150 {
+		t.Fatalf("unexpected upload mtu: got=%d want=150", got)
+	}
+	if got := int(binary.BigEndian.Uint16(payload[4:6])); got != 200 {
+		t.Fatalf("unexpected download mtu: got=%d want=200", got)
+	}
+	if string(payload[6:10]) != string(verifyCode[:]) {
+		t.Fatalf("unexpected verify code bytes: got=%v want=%v", payload[6:10], verifyCode)
 	}
 }

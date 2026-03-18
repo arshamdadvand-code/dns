@@ -17,7 +17,7 @@ import (
 func main() {
 	app, err := client.Bootstrap("client_config.toml")
 	if err != nil {
-		_, _ = os.Stderr.WriteString(fmt.Sprintf("Client startup failed: %v\n", err))
+		_, _ = fmt.Fprintf(os.Stderr, "Client startup failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -51,7 +51,7 @@ func main() {
 	)
 
 	if err := app.RunInitialMTUTests(); err != nil {
-		_, _ = os.Stderr.WriteString(fmt.Sprintf("Initial MTU testing failed: %v\n", err))
+		_, _ = fmt.Fprintf(os.Stderr, "Initial MTU testing failed: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -59,6 +59,17 @@ func main() {
 		"📏 <green>Initial MTU Sync Completed</green> <magenta>|</magenta> <blue>Upload</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Download</blue>: <cyan>%d</cyan>",
 		app.SyncedUploadMTU(),
 		app.SyncedDownloadMTU(),
+	)
+
+	if err := app.InitializeSession(10); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Session initialization failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	log.Infof(
+		"🤝 <green>Session Established</green> <magenta>|</magenta> <blue>ID</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Cookie</blue>: <magenta>%d</magenta>",
+		app.SessionID(),
+		app.SessionCookie(),
 	)
 	log.Infof("🎯 <green>Client Bootstrap Ready</green>")
 }

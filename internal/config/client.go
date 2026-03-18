@@ -15,6 +15,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"masterdnsvpn-go/internal/compression"
 )
 
 type ClientConfig struct {
@@ -24,6 +26,8 @@ type ClientConfig struct {
 	Domains                   []string          `toml:"DOMAINS"`
 	ResolverBalancingStrategy int               `toml:"RESOLVER_BALANCING_STRATEGY"`
 	BaseEncodeData            bool              `toml:"BASE_ENCODE_DATA"`
+	UploadCompressionType     int               `toml:"UPLOAD_COMPRESSION_TYPE"`
+	DownloadCompressionType   int               `toml:"DOWNLOAD_COMPRESSION_TYPE"`
 	DataEncryptionMethod      int               `toml:"DATA_ENCRYPTION_METHOD"`
 	EncryptionKey             string            `toml:"ENCRYPTION_KEY"`
 	MinUploadMTU              int               `toml:"MIN_UPLOAD_MTU"`
@@ -44,6 +48,8 @@ func defaultClientConfig() ClientConfig {
 		Domains:                   nil,
 		ResolverBalancingStrategy: 0,
 		BaseEncodeData:            false,
+		UploadCompressionType:     compression.TypeOff,
+		DownloadCompressionType:   compression.TypeOff,
 		DataEncryptionMethod:      1,
 		EncryptionKey:             "",
 		MinUploadMTU:              70,
@@ -90,6 +96,12 @@ func LoadClientConfig(filename string) (ClientConfig, error) {
 
 	if cfg.DataEncryptionMethod < 0 || cfg.DataEncryptionMethod > 5 {
 		return cfg, fmt.Errorf("invalid DATA_ENCRYPTION_METHOD: %d", cfg.DataEncryptionMethod)
+	}
+	if cfg.UploadCompressionType < compression.TypeOff || cfg.UploadCompressionType > compression.TypeZLIB {
+		return cfg, fmt.Errorf("invalid UPLOAD_COMPRESSION_TYPE: %d", cfg.UploadCompressionType)
+	}
+	if cfg.DownloadCompressionType < compression.TypeOff || cfg.DownloadCompressionType > compression.TypeZLIB {
+		return cfg, fmt.Errorf("invalid DOWNLOAD_COMPRESSION_TYPE: %d", cfg.DownloadCompressionType)
 	}
 	if cfg.ResolverBalancingStrategy < 0 || cfg.ResolverBalancingStrategy > 4 {
 		return cfg, fmt.Errorf("invalid RESOLVER_BALANCING_STRATEGY: %d", cfg.ResolverBalancingStrategy)

@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	"masterdnsvpn-go/internal/domainmatcher"
@@ -30,6 +31,7 @@ const (
 	mtuProbeModeBase64 = 1
 	mtuProbeCodeLength = 4
 	mtuProbeMetaLength = mtuProbeCodeLength + 2
+	sessionAcceptSize  = 7
 )
 
 type Server struct {
@@ -37,6 +39,7 @@ type Server struct {
 	log             *logger.Logger
 	codec           *security.Codec
 	domainMatcher   *domainmatcher.Matcher
+	sessions        *sessionStore
 	packetPool      sync.Pool
 	droppedPackets  atomic.Uint64
 	lastDropLogUnix atomic.Int64
@@ -54,6 +57,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		log:           log,
 		codec:         codec,
 		domainMatcher: domainmatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
+		sessions:      newSessionStore(),
 		packetPool: sync.Pool{
 			New: func() any {
 				return make([]byte, cfg.MaxPacketSize)
@@ -250,6 +254,8 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	}
 
 	switch vpnPacket.PacketType {
+	case ENUMS.PacketSessionInit:
+		return s.handleSessionInitRequest(packet, decision, vpnPacket)
 	case ENUMS.PacketMTUUpReq:
 		return s.handleMTUUpRequest(packet, parsed, decision, vpnPacket)
 	case ENUMS.PacketMTUDownReq:
@@ -261,6 +267,32 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 		}
 		return response
 	}
+}
+
+func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VPNProto.Packet) []byte {
+	if vpnPacket.SessionID != 0 {
+		return nil
+	}
+	record, _, err := s.sessions.findOrCreate(vpnPacket.Payload)
+	if err != nil || record == nil {
+		return nil
+	}
+
+	responsePayload := make([]byte, sessionAcceptSize)
+	responsePayload[0] = record.ID
+	responsePayload[1] = record.Cookie
+	responsePayload[2] = compression.PackPair(record.UploadCompression, record.DownloadCompression)
+	copy(responsePayload[3:], record.VerifyCode[:])
+
+	response, err := DnsParser.BuildVPNResponsePacket(questionPacket, decision.RequestName, VPNProto.Packet{
+		SessionID:  0,
+		PacketType: ENUMS.PacketSessionAccept,
+		Payload:    responsePayload,
+	}, record.ResponseMode == mtuProbeModeBase64)
+	if err != nil {
+		return nil
+	}
+	return response
 }
 
 func (s *Server) onDrop(addr *net.UDPAddr) {

@@ -26,13 +26,15 @@ type Client struct {
 	connections      []Connection
 	connectionsByKey map[string]int
 
-	successMTUChecks  bool
-	sessionID         uint8
-	sessionCookie     uint8
-	enqueueSeq        uint64
-	syncedUploadMTU   int
-	syncedDownloadMTU int
-	syncedUploadChars int
+	successMTUChecks    bool
+	sessionID           uint8
+	sessionCookie       uint8
+	uploadCompression   uint8
+	downloadCompression uint8
+	enqueueSeq          uint64
+	syncedUploadMTU     int
+	syncedDownloadMTU   int
+	syncedUploadChars   int
 }
 
 type Connection struct {
@@ -72,6 +74,8 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		connectionsByKey: make(map[string]int, len(cfg.Domains)*len(cfg.Resolvers)),
 	}
 	c.ResetRuntimeState(true)
+	c.uploadCompression = uint8(cfg.UploadCompressionType)
+	c.downloadCompression = uint8(cfg.DownloadCompressionType)
 	return c
 }
 
@@ -105,6 +109,14 @@ func (c *Client) SyncedDownloadMTU() int {
 
 func (c *Client) SyncedUploadChars() int {
 	return c.syncedUploadChars
+}
+
+func (c *Client) SessionID() uint8 {
+	return c.sessionID
+}
+
+func (c *Client) SessionCookie() uint8 {
+	return c.sessionCookie
 }
 
 func (c *Client) ResetRuntimeState(resetSessionCookie bool) {

@@ -21,6 +21,11 @@ RESOLVER_BALANCING_STRATEGY = 0
 # If false, server returns raw byte TXT payloads.
 BASE_ENCODE_DATA = false
 
+# Compression types:
+# 0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB
+UPLOAD_COMPRESSION_TYPE = 0
+DOWNLOAD_COMPRESSION_TYPE = 0
+
 # Encryption method:
 # 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
 # Must match server DATA_ENCRYPTION_METHOD.
