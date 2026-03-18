@@ -16,8 +16,8 @@ func TestPacketEnumValuesAreStable(t *testing.T) {
 	if PACKET_STREAM_DATA != 0x0B {
 		t.Fatalf("unexpected PACKET_STREAM_DATA value: got=%#x want=%#x", PACKET_STREAM_DATA, 0x0B)
 	}
-	if PACKET_DNS_QUERY_REQ != 0x2F {
-		t.Fatalf("unexpected PACKET_DNS_QUERY_REQ value: got=%#x want=%#x", PACKET_DNS_QUERY_REQ, 0x2F)
+	if PACKET_DNS_QUERY_REQ != 0x29 {
+		t.Fatalf("unexpected PACKET_DNS_QUERY_REQ value: got=%#x want=%#x", PACKET_DNS_QUERY_REQ, 0x29)
 	}
 	if PACKET_ERROR_DROP != 0xFF {
 		t.Fatalf("unexpected PACKET_ERROR_DROP value: got=%#x want=%#x", PACKET_ERROR_DROP, 0xFF)
@@ -44,12 +44,6 @@ func TestPacketEnumValuesAreUnique(t *testing.T) {
 		PACKET_STREAM_FIN_ACK,
 		PACKET_STREAM_RST,
 		PACKET_STREAM_RST_ACK,
-		PACKET_STREAM_KEEPALIVE,
-		PACKET_STREAM_KEEPALIVE_ACK,
-		PACKET_STREAM_WINDOW_UPDATE,
-		PACKET_STREAM_WINDOW_UPDATE_ACK,
-		PACKET_STREAM_PROBE,
-		PACKET_STREAM_PROBE_ACK,
 		PACKET_SOCKS5_SYN,
 		PACKET_SOCKS5_SYN_ACK,
 		PACKET_SOCKS5_CONNECT_FAIL,
