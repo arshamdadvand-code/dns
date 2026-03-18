@@ -331,6 +331,14 @@ func TestHandlePacketDropsPostSessionPacketWithInvalidCookie(t *testing.T) {
 	if response := srv.handlePacket(postSessionQuery); len(response) != 0 {
 		t.Fatal("post-session packet with invalid cookie must be dropped")
 	}
+	if _, ok := srv.sessions.Active(sessionID); !ok {
+		t.Fatal("invalid cookie packet must not close a valid session")
+	}
+
+	validCookieQuery := buildTunnelQueryWithCookie(t, codec, "a.com", sessionID, packet.Payload[1], Enums.PACKET_PING, nil)
+	if response := srv.handlePacket(validCookieQuery); len(response) == 0 {
+		t.Fatal("valid packet after invalid cookie must still be processed")
+	}
 }
 
 func TestHandlePacketAcceptsPostSessionPacketWithValidCookie(t *testing.T) {

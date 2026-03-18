@@ -41,6 +41,7 @@ type Server struct {
 	codec                   *security.Codec
 	domainMatcher           *domainmatcher.Matcher
 	sessions                *sessionStore
+	invalidCookieTracker    *invalidCookieTracker
 	uploadCompressionMask   uint8
 	downloadCompressionMask uint8
 	packetPool              sync.Pool
@@ -61,6 +62,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		codec:                   codec,
 		domainMatcher:           domainmatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
 		sessions:                newSessionStore(),
+		invalidCookieTracker:    newInvalidCookieTracker(),
 		uploadCompressionMask:   buildCompressionMask(cfg.SupportedUploadCompressionTypes),
 		downloadCompressionMask: buildCompressionMask(cfg.SupportedDownloadCompressionTypes),
 		packetPool: sync.Pool{
@@ -169,6 +171,7 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 			return
 		case now := <-ticker.C:
 			expired := s.sessions.Cleanup(now, s.cfg.SessionTimeout(), s.cfg.ClosedSessionRetention())
+			s.invalidCookieTracker.Cleanup(now, s.cfg.InvalidCookieWindow())
 			if len(expired) == 0 {
 				continue
 			}
@@ -303,7 +306,35 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 		return response
 	}
 	if !isPreSessionRequestType(vpnPacket.PacketType) {
+		expectedCookie, hasExpectedCookie := s.sessions.ExpectedCookie(vpnPacket.SessionID)
 		if !s.sessions.ValidateCookie(vpnPacket.SessionID, vpnPacket.SessionCookie) {
+			var expectedCookiePtr *uint8
+			if hasExpectedCookie {
+				expectedCookiePtr = &expectedCookie
+			}
+			if s.invalidCookieTracker.Note(
+				vpnPacket.SessionID,
+				expectedCookiePtr,
+				vpnPacket.SessionCookie,
+				time.Now(),
+				s.cfg.InvalidCookieWindow(),
+				s.cfg.InvalidCookieErrorThreshold,
+			) {
+				if hasExpectedCookie {
+					s.log.Warnf(
+						"🧷 <yellow>Invalid Session Cookie Threshold Reached</yellow> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Expected</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan>",
+						vpnPacket.SessionID,
+						expectedCookie,
+						vpnPacket.SessionCookie,
+					)
+				} else {
+					s.log.Warnf(
+						"🧷 <yellow>Unknown Session Cookie Threshold Reached</yellow> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan>",
+						vpnPacket.SessionID,
+						vpnPacket.SessionCookie,
+					)
+				}
+			}
 			return nil
 		}
 		s.sessions.Touch(vpnPacket.SessionID, time.Now())

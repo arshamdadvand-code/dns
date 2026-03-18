@@ -30,6 +30,8 @@ type ServerConfig struct {
 	DNSRequestWorkers                 int      `toml:"DNS_REQUEST_WORKERS"`
 	MaxPacketSize                     int      `toml:"MAX_PACKET_SIZE"`
 	DropLogIntervalSecs               float64  `toml:"DROP_LOG_INTERVAL_SECONDS"`
+	InvalidCookieWindowSecs           float64  `toml:"INVALID_COOKIE_WINDOW_SECONDS"`
+	InvalidCookieErrorThreshold       int      `toml:"INVALID_COOKIE_ERROR_THRESHOLD"`
 	SessionTimeoutSecs                float64  `toml:"SESSION_TIMEOUT_SECONDS"`
 	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
 	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
@@ -56,6 +58,8 @@ func defaultServerConfig() ServerConfig {
 		DNSRequestWorkers:                 workers,
 		MaxPacketSize:                     65535,
 		DropLogIntervalSecs:               2.0,
+		InvalidCookieWindowSecs:           2.0,
+		InvalidCookieErrorThreshold:       10,
 		SessionTimeoutSecs:                300.0,
 		SessionCleanupIntervalSecs:        30.0,
 		ClosedSessionRetentionSecs:        600.0,
@@ -118,6 +122,12 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DropLogIntervalSecs <= 0 {
 		cfg.DropLogIntervalSecs = 2.0
 	}
+	if cfg.InvalidCookieWindowSecs <= 0 {
+		cfg.InvalidCookieWindowSecs = 2.0
+	}
+	if cfg.InvalidCookieErrorThreshold <= 0 {
+		cfg.InvalidCookieErrorThreshold = 10
+	}
 	if cfg.SessionTimeoutSecs <= 0 {
 		cfg.SessionTimeoutSecs = 300.0
 	}
@@ -155,6 +165,10 @@ func (c ServerConfig) Address() string {
 
 func (c ServerConfig) DropLogInterval() time.Duration {
 	return time.Duration(c.DropLogIntervalSecs * float64(time.Second))
+}
+
+func (c ServerConfig) InvalidCookieWindow() time.Duration {
+	return time.Duration(c.InvalidCookieWindowSecs * float64(time.Second))
 }
 
 func (c ServerConfig) SessionTimeout() time.Duration {
