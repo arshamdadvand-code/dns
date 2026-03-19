@@ -78,6 +78,10 @@ type clientStream struct {
 	ResetSent      bool
 	Closed         bool
 	LastActivityAt time.Time
+	InboundDataSeq uint16
+	InboundDataSet bool
+	RemoteFinSeq   uint16
+	RemoteFinSet   bool
 }
 
 func Bootstrap(configPath string) (*Client, error) {

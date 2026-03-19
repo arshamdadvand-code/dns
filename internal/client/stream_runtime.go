@@ -147,6 +147,14 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 
 	switch packet.PacketType {
 	case Enums.PACKET_STREAM_DATA:
+		stream.mu.Lock()
+		if stream.InboundDataSet && sequenceSeenOrOlder(stream.InboundDataSeq, packet.SequenceNum) {
+			stream.mu.Unlock()
+			return c.exchangeStreamControlPacket(Enums.PACKET_STREAM_DATA_ACK, stream.ID, packet.SequenceNum, nil, timeout)
+		}
+		stream.InboundDataSeq = packet.SequenceNum
+		stream.InboundDataSet = true
+		stream.mu.Unlock()
 		if len(packet.Payload) != 0 {
 			if _, err := stream.Conn.Write(packet.Payload); err != nil {
 				stream.mu.Lock()
@@ -159,6 +167,12 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 		return c.exchangeStreamControlPacket(Enums.PACKET_STREAM_DATA_ACK, stream.ID, packet.SequenceNum, nil, timeout)
 	case Enums.PACKET_STREAM_FIN:
 		stream.mu.Lock()
+		if stream.RemoteFinSet && stream.RemoteFinSeq == packet.SequenceNum {
+			stream.mu.Unlock()
+			return c.exchangeStreamControlPacket(Enums.PACKET_STREAM_FIN_ACK, stream.ID, packet.SequenceNum, nil, timeout)
+		}
+		stream.RemoteFinSeq = packet.SequenceNum
+		stream.RemoteFinSet = true
 		stream.RemoteFinRecv = true
 		stream.mu.Unlock()
 		closeWriteConn(stream.Conn)
@@ -235,4 +249,9 @@ func closeWriteConn(conn net.Conn) {
 		return
 	}
 	_ = conn.Close()
+}
+
+func sequenceSeenOrOlder(last uint16, current uint16) bool {
+	diff := uint16(current - last)
+	return diff == 0 || diff >= 0x8000
 }

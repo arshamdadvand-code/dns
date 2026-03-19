@@ -1013,6 +1013,53 @@ func TestPerformSOCKS5HandshakeParsesConnectRequest(t *testing.T) {
 	}
 }
 
+func TestHandleInboundStreamPacketIgnoresDuplicateData(t *testing.T) {
+	c := New(config.ClientConfig{}, nil, nil)
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	stream := c.createStream(5, serverConn)
+	packet := VpnProto.Packet{
+		PacketType:  Enums.PACKET_STREAM_DATA,
+		StreamID:    5,
+		SequenceNum: 7,
+		Payload:     []byte("abc"),
+	}
+
+	writeDone := make(chan []byte, 2)
+	go func() {
+		buffer := make([]byte, 8)
+		n, _ := clientConn.Read(buffer)
+		writeDone <- append([]byte(nil), buffer[:n]...)
+		_ = clientConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n, err := clientConn.Read(buffer)
+		if err == nil {
+			writeDone <- append([]byte(nil), buffer[:n]...)
+			return
+		}
+		writeDone <- nil
+	}()
+
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		return nil, ErrTunnelDNSDispatchFailed
+	}
+
+	_, _ = c.handleInboundStreamPacket(packet, time.Second)
+	_, _ = c.handleInboundStreamPacket(packet, time.Second)
+
+	first := <-writeDone
+	second := <-writeDone
+	if string(first) != "abc" {
+		t.Fatalf("unexpected first payload: %q", first)
+	}
+	if second != nil {
+		t.Fatalf("duplicate inbound stream data must not be written again: %q", second)
+	}
+
+	c.deleteStream(stream.ID)
+}
+
 func TestDispatchDNSQueryFailsWithoutValidConnections(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

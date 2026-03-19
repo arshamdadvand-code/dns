@@ -27,6 +27,10 @@ type streamStateRecord struct {
 	LastActivityAt time.Time
 	LastSequence   uint16
 	OutboundSeq    uint16
+	InboundDataSeq uint16
+	InboundDataSet bool
+	RemoteFinSeq   uint16
+	RemoteFinSet   bool
 }
 
 type streamStateStore struct {
@@ -127,6 +131,8 @@ func (s *streamStateStore) MarkRemoteFin(sessionID uint8, streamID uint16, seque
 	}
 	record.LastActivityAt = now
 	record.LastSequence = sequenceNum
+	record.RemoteFinSeq = sequenceNum
+	record.RemoteFinSet = true
 	closeWriteConn(record.UpstreamConn)
 	switch record.State {
 	case Enums.STREAM_STATE_HALF_CLOSED_LOCAL:
@@ -135,6 +141,40 @@ func (s *streamStateStore) MarkRemoteFin(sessionID uint8, streamID uint16, seque
 		record.State = Enums.STREAM_STATE_HALF_CLOSED_REMOTE
 	}
 	return cloneStreamStateRecord(record), true
+}
+
+func (s *streamStateStore) ClassifyInboundData(sessionID uint8, streamID uint16, sequenceNum uint16, now time.Time) (*streamStateRecord, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.lookupLocked(sessionID, streamID)
+	if record == nil {
+		return nil, false, false
+	}
+	record.LastActivityAt = now
+	record.LastSequence = sequenceNum
+	if record.InboundDataSet && sequenceSeenOrOlder(record.InboundDataSeq, sequenceNum) {
+		return cloneStreamStateRecord(record), true, false
+	}
+	record.InboundDataSeq = sequenceNum
+	record.InboundDataSet = true
+	return cloneStreamStateRecord(record), true, true
+}
+
+func (s *streamStateStore) IsDuplicateRemoteFin(sessionID uint8, streamID uint16, sequenceNum uint16, now time.Time) (*streamStateRecord, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record := s.lookupLocked(sessionID, streamID)
+	if record == nil {
+		return nil, false, false
+	}
+	record.LastActivityAt = now
+	record.LastSequence = sequenceNum
+	if record.RemoteFinSet && record.RemoteFinSeq == sequenceNum {
+		return cloneStreamStateRecord(record), true, true
+	}
+	return cloneStreamStateRecord(record), true, false
 }
 
 func (s *streamStateStore) MarkLocalFin(sessionID uint8, streamID uint16, sequenceNum uint16, now time.Time) (*streamStateRecord, bool) {
@@ -255,4 +295,9 @@ func closeWriteConn(conn net.Conn) {
 		return
 	}
 	_ = conn.Close()
+}
+
+func sequenceSeenOrOlder(last uint16, current uint16) bool {
+	diff := uint16(current - last)
+	return diff == 0 || diff >= 0x8000
 }

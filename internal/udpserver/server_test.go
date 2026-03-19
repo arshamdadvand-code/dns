@@ -568,6 +568,65 @@ func TestHandlePacketRespondsToStreamLifecyclePackets(t *testing.T) {
 	}
 }
 
+func TestHandlePacketIgnoresDuplicateStreamDataWrite(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, 0x10, 0x20, 0x30, 0x40}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+
+	synQuery := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_SYN, 12, 1, nil)
+	_ = srv.handlePacket(synQuery)
+
+	upstreamConn, peerConn := net.Pipe()
+	defer upstreamConn.Close()
+	defer peerConn.Close()
+	if _, ok := srv.streams.AttachUpstream(sessionID, 12, "127.0.0.1", 80, upstreamConn, time.Now()); !ok {
+		t.Fatal("AttachUpstream returned false")
+	}
+
+	readDone := make(chan []byte, 2)
+	go func() {
+		buffer := make([]byte, 16)
+		n, _ := peerConn.Read(buffer)
+		readDone <- append([]byte(nil), buffer[:n]...)
+		_ = peerConn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		n, err := peerConn.Read(buffer)
+		if err == nil {
+			readDone <- append([]byte(nil), buffer[:n]...)
+			return
+		}
+		readDone <- nil
+	}()
+
+	dataQuery := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_DATA, 12, 9, []byte("hello"))
+	_ = srv.handlePacket(dataQuery)
+	_ = srv.handlePacket(dataQuery)
+
+	first := <-readDone
+	second := <-readDone
+	if string(first) != "hello" {
+		t.Fatalf("unexpected first payload: %q", first)
+	}
+	if second != nil {
+		t.Fatalf("duplicate stream data must not be written again: %q", second)
+	}
+}
+
 func TestHandlePacketResetsUnknownStreamData(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

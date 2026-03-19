@@ -858,7 +858,7 @@ func (s *Server) handleStreamDataRequest(questionPacket []byte, decision domainm
 	if !ok {
 		return nil
 	}
-	streamRecord, ok := s.streams.Touch(vpnPacket.SessionID, vpnPacket.StreamID, vpnPacket.SequenceNum, time.Now())
+	streamRecord, ok, isNew := s.streams.ClassifyInboundData(vpnPacket.SessionID, vpnPacket.StreamID, vpnPacket.SequenceNum, time.Now())
 	if !ok || streamRecord == nil {
 		return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
 			PacketType:  Enums.PACKET_STREAM_RST,
@@ -868,6 +868,13 @@ func (s *Server) handleStreamDataRequest(questionPacket []byte, decision domainm
 	}
 	switch streamRecord.State {
 	case Enums.STREAM_STATE_OPEN, Enums.STREAM_STATE_HALF_CLOSED_LOCAL, Enums.STREAM_STATE_HALF_CLOSED_REMOTE, Enums.STREAM_STATE_DRAINING, Enums.STREAM_STATE_CLOSING, Enums.STREAM_STATE_TIME_WAIT:
+		if !isNew {
+			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+				PacketType:  Enums.PACKET_STREAM_DATA_ACK,
+				StreamID:    vpnPacket.StreamID,
+				SequenceNum: vpnPacket.SequenceNum,
+			})
+		}
 		if streamRecord.UpstreamConn == nil || !streamRecord.Connected {
 			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
 				PacketType:  Enums.PACKET_STREAM_RST,
@@ -913,6 +920,13 @@ func (s *Server) handleStreamFinRequest(questionPacket []byte, decision domainma
 	sessionRecord, ok := s.sessions.Active(vpnPacket.SessionID)
 	if !ok {
 		return nil
+	}
+	if existing, ok, duplicate := s.streams.IsDuplicateRemoteFin(vpnPacket.SessionID, vpnPacket.StreamID, vpnPacket.SequenceNum, time.Now()); ok && existing != nil && duplicate {
+		return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+			PacketType:  Enums.PACKET_STREAM_FIN_ACK,
+			StreamID:    vpnPacket.StreamID,
+			SequenceNum: vpnPacket.SequenceNum,
+		})
 	}
 	if _, ok := s.streams.MarkRemoteFin(vpnPacket.SessionID, vpnPacket.StreamID, vpnPacket.SequenceNum, time.Now()); !ok {
 		return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
