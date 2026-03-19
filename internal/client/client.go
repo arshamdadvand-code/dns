@@ -96,6 +96,7 @@ type clientStreamTXPacket struct {
 	Payload     []byte
 	RetryDelay  time.Duration
 	RetryAt     time.Time
+	Scheduled   bool
 }
 
 func Bootstrap(configPath string) (*Client, error) {

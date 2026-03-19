@@ -278,24 +278,35 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 			}
 		}
 
-		response, err := c.exchangeStreamControlPacket(packet.PacketType, stream.ID, packet.SequenceNum, packet.Payload, timeout)
-		if err != nil {
-			rescheduleClientStreamTX(stream, packet.SequenceNum)
-			continue
-		}
-		acked := ackClientStreamTXByResponse(stream, packet.PacketType, response)
-		if err := c.handleFollowUpServerPacket(response, timeout); err != nil {
+		if c.stream0Runtime == nil || !c.stream0Runtime.IsRunning() {
+			response, err := c.exchangeStreamControlPacket(packet.PacketType, stream.ID, packet.SequenceNum, packet.Payload, timeout)
+			if err != nil {
+				rescheduleClientStreamTX(stream, packet.SequenceNum)
+				continue
+			}
+			acked := ackClientStreamTXByResponse(stream, packet.PacketType, response)
+			if err := c.handleFollowUpServerPacket(response, timeout); err != nil {
+				if !acked {
+					rescheduleClientStreamTX(stream, packet.SequenceNum)
+				}
+				continue
+			}
 			if !acked {
 				rescheduleClientStreamTX(stream, packet.SequenceNum)
 			}
+			if streamFinished(stream) {
+				c.deleteStream(stream.ID)
+				return
+			}
 			continue
 		}
-		if !acked {
-			rescheduleClientStreamTX(stream, packet.SequenceNum)
+		if !markClientStreamTXScheduled(stream, packet.SequenceNum) {
+			continue
 		}
-		if streamFinished(stream) {
-			c.deleteStream(stream.ID)
-			return
+		if !c.stream0Runtime.QueueStreamPacket(stream.ID, packet.PacketType, packet.SequenceNum, packet.Payload) {
+			rescheduleClientStreamTX(stream, packet.SequenceNum)
+			time.Sleep(25 * time.Millisecond)
+			continue
 		}
 	}
 }
@@ -318,6 +329,7 @@ func nextClientStreamTX(stream *clientStream, windowSize int) (*clientStreamTXPa
 			packet.RetryDelay = streamTXInitialRetryDelay
 		}
 		packet.RetryAt = now
+		packet.Scheduled = false
 		stream.TXInFlight = append(stream.TXInFlight, packet)
 	}
 	if len(stream.TXInFlight) == 0 {
@@ -327,6 +339,9 @@ func nextClientStreamTX(stream *clientStream, windowSize int) (*clientStreamTXPa
 	selectedIdx := -1
 	minWait := time.Duration(-1)
 	for idx := range stream.TXInFlight {
+		if stream.TXInFlight[idx].Scheduled {
+			continue
+		}
 		waitFor := time.Until(stream.TXInFlight[idx].RetryAt)
 		if waitFor <= 0 {
 			selectedIdx = idx
@@ -358,6 +373,7 @@ func rescheduleClientStreamTX(stream *clientStream, sequenceNum uint16) {
 		if delay <= 0 {
 			delay = streamTXInitialRetryDelay
 		}
+		stream.TXInFlight[idx].Scheduled = false
 		stream.TXInFlight[idx].RetryAt = time.Now().Add(delay)
 		delay *= 2
 		if delay > streamTXMaxRetryDelay {
@@ -366,6 +382,25 @@ func rescheduleClientStreamTX(stream *clientStream, sequenceNum uint16) {
 		stream.TXInFlight[idx].RetryDelay = delay
 		return
 	}
+}
+
+func markClientStreamTXScheduled(stream *clientStream, sequenceNum uint16) bool {
+	if stream == nil {
+		return false
+	}
+	stream.mu.Lock()
+	defer stream.mu.Unlock()
+	for idx := range stream.TXInFlight {
+		if stream.TXInFlight[idx].SequenceNum != sequenceNum {
+			continue
+		}
+		if stream.TXInFlight[idx].Scheduled {
+			return false
+		}
+		stream.TXInFlight[idx].Scheduled = true
+		return true
+	}
+	return false
 }
 
 func ackClientStreamTX(stream *clientStream, sequenceNum uint16) {

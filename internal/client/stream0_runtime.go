@@ -21,8 +21,10 @@ import (
 var ErrStream0RuntimeStopped = errors.New("stream 0 runtime stopped")
 
 const (
-	stream0DNSPriority  = 2
-	stream0PingPriority = 4
+	stream0DNSPriority           = 2
+	stream0StreamControlPriority = 3
+	stream0PingPriority          = 4
+	stream0StreamDataPriority    = 8
 )
 
 var (
@@ -214,6 +216,23 @@ func (r *stream0Runtime) QueuePing() bool {
 	return true
 }
 
+func (r *stream0Runtime) QueueStreamPacket(streamID uint16, packetType uint8, sequenceNum uint16, payload []byte) bool {
+	if r == nil || !r.IsRunning() || streamID == 0 {
+		return false
+	}
+	if !r.scheduler.Enqueue(arq.QueueTargetStream, arq.QueuedPacket{
+		PacketType:  packetType,
+		StreamID:    streamID,
+		SequenceNum: sequenceNum,
+		Payload:     payload,
+		Priority:    stream0PriorityForPacket(packetType),
+	}) {
+		return false
+	}
+	r.notifyWake()
+	return true
+}
+
 func (r *stream0Runtime) txLoop() {
 	defer r.wg.Done()
 	for {
@@ -302,9 +321,11 @@ func (r *stream0Runtime) nextPingSchedule(now time.Time) (bool, time.Duration) {
 }
 
 func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
-	response, err := r.client.sendStream0Packet(packet)
+	response, err := r.client.sendScheduledPacket(packet)
 	if err != nil {
-		if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
+		if packet.StreamID != 0 {
+			r.rescheduleStreamPacket(packet.StreamID, packet.SequenceNum)
+		} else if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
 			r.scheduleRetry(packet.SequenceNum, err)
 		}
 		return
@@ -331,11 +352,15 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 			)
 		}
 	case 0:
-		if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
+		if packet.StreamID != 0 {
+			r.rescheduleStreamPacket(packet.StreamID, packet.SequenceNum)
+		} else if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
 			r.scheduleRetry(packet.SequenceNum, ErrTunnelDNSDispatchFailed)
 		}
 	default:
-		if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
+		if packet.StreamID != 0 {
+			r.rescheduleStreamPacket(packet.StreamID, packet.SequenceNum)
+		} else if packet.PacketType == Enums.PACKET_DNS_QUERY_REQ {
 			r.scheduleRetry(packet.SequenceNum, ErrTunnelDNSDispatchFailed)
 		}
 	}
@@ -460,4 +485,25 @@ func (r *stream0Runtime) scheduleRetry(sequenceNum uint16, err error) {
 
 func packetTypeForDNSQuery() uint8 {
 	return Enums.PACKET_DNS_QUERY_REQ
+}
+
+func stream0PriorityForPacket(packetType uint8) int {
+	switch packetType {
+	case Enums.PACKET_STREAM_DATA:
+		return stream0StreamDataPriority
+	default:
+		return stream0StreamControlPriority
+	}
+}
+
+func (r *stream0Runtime) rescheduleStreamPacket(streamID uint16, sequenceNum uint16) {
+	if r == nil || r.client == nil {
+		return
+	}
+	stream, ok := r.client.getStream(streamID)
+	if !ok || stream == nil {
+		return
+	}
+	rescheduleClientStreamTX(stream, sequenceNum)
+	notifyStreamWake(stream)
 }

@@ -106,7 +106,7 @@ func (c *Client) sendMainStreamPacketWithConnection(connection Connection, packe
 	return c.sendFragmentedStreamPacketWithConnection(connection, packetType, 0, sequenceNum, payload, timeout, ErrTunnelDNSDispatchFailed)
 }
 
-func (c *Client) sendStream0Packet(packet arq.QueuedPacket) (VpnProto.Packet, error) {
+func (c *Client) sendScheduledPacket(packet arq.QueuedPacket) (VpnProto.Packet, error) {
 	if c == nil {
 		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
 	}
@@ -127,8 +127,40 @@ func (c *Client) sendStream0Packet(packet arq.QueuedPacket) (VpnProto.Packet, er
 	case Enums.PACKET_PING:
 		return c.sendSessionControlPacket(packet.PacketType, packet.Payload, connections, timeout)
 	default:
-		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+		if packet.StreamID == 0 {
+			return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+		}
+		return c.sendStreamPacket(packet, connections, timeout)
 	}
+}
+
+func (c *Client) sendStreamPacket(packet arq.QueuedPacket, connections []Connection, timeout time.Duration) (VpnProto.Packet, error) {
+	if c == nil {
+		return VpnProto.Packet{}, ErrStreamHandshakeFailed
+	}
+	if len(connections) == 0 {
+		connections = c.GetUniqueConnections(3)
+	}
+	if len(connections) == 0 {
+		return VpnProto.Packet{}, ErrNoValidConnections
+	}
+
+	lastErr := ErrStreamHandshakeFailed
+	for _, connection := range connections {
+		response, err := c.sendStreamControlPacketWithConnection(
+			connection,
+			packet.PacketType,
+			packet.StreamID,
+			packet.SequenceNum,
+			packet.Payload,
+			timeout,
+		)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+	}
+	return VpnProto.Packet{}, lastErr
 }
 
 func (c *Client) buildSessionControlQuery(domain string, packetType uint8, payload []byte) ([]byte, error) {
