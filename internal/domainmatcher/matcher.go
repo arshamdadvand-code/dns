@@ -99,7 +99,6 @@ func (m *Matcher) Match(parsed DnsParser.LitePacket) Decision {
 			QuestionType: q0.Type,
 		}
 	}
-	labels = stripLabelDots(labels)
 
 	if labels == "" {
 		return Decision{
@@ -257,11 +256,12 @@ func stripLabelDots(labels string) string {
 		return labels
 	}
 
-	buf := make([]byte, 0, len(labels))
+	var b strings.Builder
+	b.Grow(len(labels))
 	for i := 0; i < len(labels); i++ {
 		if labels[i] != '.' {
-			buf = append(buf, labels[i])
+			b.WriteByte(labels[i])
 		}
 	}
-	return string(buf)
+	return b.String()
 }
