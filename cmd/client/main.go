@@ -101,6 +101,16 @@ func main() {
 				cfg.ListenIP,
 				cfg.ListenPort,
 			)
+			if cfg.SOCKS5Auth {
+				log.Infof(
+					"\U0001F510 <green>Local SOCKS5 Auth User: <cyan>%s</cyan></green>",
+					cfg.SOCKS5User,
+				)
+				log.Infof(
+					"\U0001F511 <green>Local SOCKS5 Auth Pass: <cyan>%s</cyan></green>",
+					cfg.SOCKS5Pass,
+				)
+			}
 		}
 
 		log.Infof(
