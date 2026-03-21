@@ -79,6 +79,17 @@ type Client struct {
 	sessionInitCursor   int
 	sessionInitBusyUnix atomic.Int64
 	sessionResetPending atomic.Bool
+
+	// Async Runtime Workers & Channels
+	asyncWG              sync.WaitGroup
+	asyncCancel          context.CancelFunc
+	tunnelConn           *net.UDPConn
+	txChannel            chan asyncPacket
+	rxChannel            chan asyncReadPacket
+	tunnelReaderWorkers  int
+	tunnelWriterWorkers  int
+	tunnelProcessWorkers int
+	tunnelPacketTimeout  time.Duration
 }
 
 // Connection represents a unique domain-resolver pair with its associated metadata and MTU states.
@@ -155,6 +166,14 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		mtuUsingSeparatorText:     cfg.MTUUsingSeparatorText,
 		mtuRemovedServerLogFormat: cfg.MTURemovedServerLogFormat,
 		mtuAddedServerLogFormat:   cfg.MTUAddedServerLogFormat,
+
+		// Workers config
+		tunnelReaderWorkers:  4,
+		tunnelWriterWorkers:  4,
+		tunnelProcessWorkers: 2,
+		tunnelPacketTimeout:  time.Second * 5,
+		txChannel:            make(chan asyncPacket, 1024),
+		rxChannel:            make(chan asyncReadPacket, 1024),
 	}
 }
 
@@ -287,6 +306,7 @@ func (c *Client) Run(ctx context.Context) error {
 				if retries < 1 {
 					retries = 3
 				}
+
 				if err := c.InitializeSession(retries); err != nil {
 					c.log.Errorf("<red>❌ Session initialization failed: %v</red>", err)
 					select {
@@ -297,11 +317,18 @@ func (c *Client) Run(ctx context.Context) error {
 					continue
 				}
 				c.log.Infof("<green>✅ Session Initialized Successfully (ID: <cyan>%d</cyan>)</green>", c.sessionID)
+
+				// Start the asynchronous workers processing the raw pipeline
+				if err := c.StartAsyncRuntime(ctx); err != nil {
+					c.log.Errorf("<red>❌ Async Runtime failed to launch: %v</red>", err)
+					return err
+				}
 			}
 
 			// Placeholder for the rest of the runtime logic (session management, etc.)
 			select {
 			case <-ctx.Done():
+				c.StopAsyncRuntime()
 				return nil
 			case <-time.After(1 * time.Second):
 				c.log.Infof("\U0001F517 <gray>Runtime loop active (MTU Success: %t, Session: %d)...</gray>", c.successMTUChecks, c.sessionID)
