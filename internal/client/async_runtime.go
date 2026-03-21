@@ -2,10 +2,12 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"time"
 
+	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 )
 
@@ -144,6 +146,19 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 				continue
 			}
 
+			if n < 12 { // Basic DNS header length
+				c.udpBufferPool.Put(buf)
+				continue
+			}
+
+			// Shallow check: DNS Response bit (QR=1)
+			// DNS Header: ID(2), Flags(2)... Flags first byte bit 7 is QR.
+			if (buf[2] & 0x80) == 0 {
+				// Not a response, we are a client, we only care about responses.
+				c.udpBufferPool.Put(buf)
+				continue
+			}
+
 			packetData := buf[:n]
 
 			select {
@@ -177,9 +192,36 @@ func (c *Client) asyncProcessorWorker(ctx context.Context, id int) {
 func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 	c.log.Debugf("Inbound packet from %v (%d bytes)", addr, len(data))
 
-	// Wake up ping manager only for non-PONG packets (actual business or control data)
-	if len(data) > 0 && data[0] != byte(Enums.PACKET_PONG) {
+	// 1. Extract VPN Packet from DNS Response
+	vpnPacket, err := DnsParser.ExtractVPNResponse(data, c.responseMode == mtuProbeBase64Reply)
+	if err != nil {
+		return
+	}
+
+	// 2. Security Validation
+	if !c.validateServerPacket(vpnPacket) {
+		return
+	}
+
+	// 3. Adaptive Ping Logic: Wake up for non-PONG data
+	if vpnPacket.PacketType != Enums.PACKET_PONG {
 		c.pingManager.NotifyDataActivity()
+	}
+
+	// 4. Dispatch to Session/Stream handler
+	dispatch, err := c.dispatchServerPacket(vpnPacket, time.Second, nil)
+	if err != nil {
+		if !errors.Is(err, ErrSessionDropped) {
+			c.log.Debugf("\U0001F9F9 <yellow>Packet Dispatch Error: <cyan>%v</cyan></yellow>", err)
+		}
+		return
+	}
+
+	// 5. Follow-up handling (e.g. multi-packet responses)
+	if dispatch.hasNext {
+		if err := c.handleFollowUpServerPacket(dispatch.next, time.Second); err != nil {
+			c.log.Debugf("\U0001F9F9 <yellow>Follow-up Packet Handling Failed: <cyan>%v</cyan></yellow>", err)
+		}
 	}
 }
 
