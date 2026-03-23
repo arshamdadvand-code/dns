@@ -13,7 +13,6 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
-	"masterdnsvpn-go/internal/mlq"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -224,7 +223,7 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 				popped, poppedOk := selected.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
 					return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 				}, func(p *clientStreamTXPacket) uint64 {
-					return mlq.GenerateKey(selected.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
+					return Enums.PacketIdentityKey(selected.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
 				})
 				if !poppedOk {
 					break
@@ -253,7 +252,7 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 						popped, poppedOk := otherStream.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
 							return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 						}, func(p *clientStreamTXPacket) uint64 {
-							return mlq.GenerateKey(sid, p.PacketType, p.SequenceNum, p.FragmentID)
+							return Enums.PacketIdentityKey(sid, p.PacketType, p.SequenceNum, p.FragmentID)
 						})
 						if !poppedOk {
 							break

@@ -18,6 +18,7 @@ import (
 
 	"masterdnsvpn-go/internal/arq"
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/mlq"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -68,8 +69,7 @@ type sessionRecord struct {
 	EnqueueSeq     uint64   // Global sequence for FIFO inside same priority
 	StreamsMu      sync.RWMutex
 	RecentlyClosed map[uint16]time.Time
-	OrphanPackets  []VpnProto.Packet
-	OrphanIndex    map[uint32]int
+	OrphanQueue    *mlq.MultiLevelQueue[VpnProto.Packet]
 }
 
 // serverStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -206,7 +206,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 		Streams:        make(map[uint16]*Stream_server),
 		ActiveStreams:  make([]uint16, 0, 8),
 		RecentlyClosed: make(map[uint16]time.Time, 8),
-		OrphanIndex:    make(map[uint32]int, 8),
+		OrphanQueue:    mlq.New[VpnProto.Packet](8),
 	}
 	// Initialize virtual Stream 0 for control packets
 	record.ensureStream0(nil) // Caller should update logger if needed
@@ -682,12 +682,12 @@ func (r *sessionRecord) cleanupTerminalStreams(now time.Time, retention time.Dur
 	}
 }
 
-func orphanResetKey(packetType uint8, streamID uint16) uint32 {
-	return uint32(packetType)<<16 | uint32(streamID)
+func orphanResetKey(packetType uint8, streamID uint16) uint64 {
+	return Enums.PacketTypeStreamKey(streamID, packetType)
 }
 
 func (r *sessionRecord) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceNum uint16) {
-	if r == nil || streamID == 0 {
+	if r == nil || r.OrphanQueue == nil || streamID == 0 {
 		return
 	}
 
@@ -699,33 +699,21 @@ func (r *sessionRecord) enqueueOrphanReset(packetType uint8, streamID uint16, se
 		HasSequenceNum: sequenceNum != 0,
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	key := orphanResetKey(packetType, streamID)
-	if idx, ok := r.OrphanIndex[key]; ok && idx >= 0 && idx < len(r.OrphanPackets) {
-		r.OrphanPackets[idx] = packet
-		return
-	}
-
-	r.OrphanIndex[key] = len(r.OrphanPackets)
-	r.OrphanPackets = append(r.OrphanPackets, packet)
+	// Orphans have high priority (0).
+	r.OrphanQueue.Push(0, key, packet)
 }
 
 func (r *sessionRecord) dequeueOrphanReset() (*VpnProto.Packet, bool) {
-	if r == nil {
+	if r == nil || r.OrphanQueue == nil {
 		return nil, false
 	}
 
-	if len(r.OrphanPackets) == 0 {
+	packet, _, ok := r.OrphanQueue.Pop(func(p VpnProto.Packet) uint64 {
+		return orphanResetKey(p.PacketType, p.StreamID)
+	})
+	if !ok {
 		return nil, false
-	}
-
-	packet := r.OrphanPackets[0]
-	r.OrphanPackets = r.OrphanPackets[1:]
-	delete(r.OrphanIndex, orphanResetKey(packet.PacketType, packet.StreamID))
-	for i := range r.OrphanPackets {
-		r.OrphanIndex[orphanResetKey(r.OrphanPackets[i].PacketType, r.OrphanPackets[i].StreamID)] = i
 	}
 
 	return &packet, true

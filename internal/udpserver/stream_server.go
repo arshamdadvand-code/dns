@@ -75,7 +75,7 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 	// Dedup and track logic would go here if needed.
 	// For now, we use the MLQ's census for basic deduplication if we define a unique key.
 	// Key: [Type(8)][Seq(16)][FragID(8)]
-	key := mlq.GenerateKey(s.ID, packetType, sequenceNum, fragmentID)
+	key := Enums.PacketIdentityKey(s.ID, packetType, sequenceNum, fragmentID)
 
 	pkt := getTXPacketFromPool()
 	pkt.PacketType = packetType

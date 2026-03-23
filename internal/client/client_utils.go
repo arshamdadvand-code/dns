@@ -148,12 +148,12 @@ func (c *Client) connectionPtrByKey(key string) *Connection {
 	return nil
 }
 
-func orphanResetKey(packetType uint8, streamID uint16) uint32 {
-	return uint32(packetType)<<16 | uint32(streamID)
+func orphanResetKey(packetType uint8, streamID uint16) uint64 {
+	return Enums.PacketTypeStreamKey(streamID, packetType)
 }
 
 func (c *Client) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceNum uint16) {
-	if c == nil || streamID == 0 {
+	if c == nil || c.orphanQueue == nil || streamID == 0 {
 		return
 	}
 
@@ -166,15 +166,8 @@ func (c *Client) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceN
 	}
 
 	key := orphanResetKey(packetType, streamID)
-
-	c.orphanMu.Lock()
-	if idx, ok := c.orphanIndex[key]; ok && idx >= 0 && idx < len(c.orphanPackets) {
-		c.orphanPackets[idx] = packet
-	} else {
-		c.orphanIndex[key] = len(c.orphanPackets)
-		c.orphanPackets = append(c.orphanPackets, packet)
-	}
-	c.orphanMu.Unlock()
+	// Orphans usually have high priority. We'll use priority 0.
+	c.orphanQueue.Push(0, key, packet)
 
 	select {
 	case c.txSignal <- struct{}{}:
@@ -183,35 +176,25 @@ func (c *Client) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceN
 }
 
 func (c *Client) dequeueOrphanReset() (*VpnProto.Packet, bool) {
-	if c == nil {
+	if c == nil || c.orphanQueue == nil {
 		return nil, false
 	}
 
-	c.orphanMu.Lock()
-	defer c.orphanMu.Unlock()
-
-	if len(c.orphanPackets) == 0 {
+	packet, _, ok := c.orphanQueue.Pop(func(p VpnProto.Packet) uint64 {
+		return orphanResetKey(p.PacketType, p.StreamID)
+	})
+	if !ok {
 		return nil, false
-	}
-
-	packet := c.orphanPackets[0]
-	c.orphanPackets = c.orphanPackets[1:]
-	delete(c.orphanIndex, orphanResetKey(packet.PacketType, packet.StreamID))
-	for i := range c.orphanPackets {
-		c.orphanIndex[orphanResetKey(c.orphanPackets[i].PacketType, c.orphanPackets[i].StreamID)] = i
 	}
 
 	return &packet, true
 }
 
 func (c *Client) clearOrphanResets() {
-	if c == nil {
+	if c == nil || c.orphanQueue == nil {
 		return
 	}
-	c.orphanMu.Lock()
-	c.orphanPackets = nil
-	clear(c.orphanIndex)
-	c.orphanMu.Unlock()
+	c.orphanQueue.Clear(nil)
 }
 
 func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) {

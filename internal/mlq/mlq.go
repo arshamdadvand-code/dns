@@ -29,17 +29,6 @@ type MultiLevelQueue[T any] struct {
 	census map[uint64]T
 }
 
-// GenerateKey builds a unique tracking key for a packet.
-// It maps PACKET_STREAM_RESEND to PACKET_STREAM_DATA for consistent deduplication.
-func GenerateKey(streamID uint16, packetType uint8, sequenceNum uint16, fragmentID uint8) uint64 {
-	t := packetType
-	if t == 129 { // PACKET_STREAM_RESEND (Manual value to avoid circular dependency if possible, but internal/enums is usually safe)
-		t = 128 // PACKET_STREAM_DATA
-	}
-	// Key: [16bit StreamID][8bit PacketType][16bit SequenceNum][8bit FragmentID]
-	return uint64(streamID)<<40 | uint64(t)<<32 | uint64(sequenceNum)<<8 | uint64(fragmentID)
-}
-
 // New creates a new MultiLevelQueue with an initial census capacity.
 func New[T any](initialCapacity int) *MultiLevelQueue[T] {
 	m := &MultiLevelQueue[T]{

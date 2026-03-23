@@ -1,0 +1,94 @@
+// ==============================================================================
+// MasterDnsVPN
+// Author: MasterkinG32
+// Github: https://github.com/masterking32
+// Year: 2026
+// ==============================================================================
+
+package enums
+
+// PacketIdentityKey builds the queue/deduplication key for stream-owned packets.
+// The key shape is explicit per packet family so deduplication follows current
+// Go semantics rather than applying one formula to every packet type.
+func PacketIdentityKey(streamID uint16, packetType uint8, sequenceNum uint16, fragmentID uint8) uint64 {
+	t := normalizeIdentityPacketType(packetType)
+
+	switch t {
+	// Data and fragment-aware control packets may coexist per fragment.
+	case PACKET_STREAM_DATA,
+		PACKET_STREAM_DATA_ACK,
+		PACKET_STREAM_SYN,
+		PACKET_STREAM_SYN_ACK,
+		PACKET_SOCKS5_SYN,
+		PACKET_SOCKS5_SYN_ACK,
+		PACKET_DNS_QUERY_REQ,
+		PACKET_DNS_QUERY_REQ_ACK,
+		PACKET_DNS_QUERY_RES,
+		PACKET_DNS_QUERY_RES_ACK:
+		return packetIdentitySeqFrag(streamID, t, sequenceNum, fragmentID)
+
+	// Terminal / result packets are unique per stream+type+sequence.
+	case PACKET_STREAM_FIN,
+		PACKET_STREAM_FIN_ACK,
+		PACKET_STREAM_RST,
+		PACKET_STREAM_RST_ACK,
+		PACKET_SOCKS5_CONNECT_FAIL,
+		PACKET_SOCKS5_CONNECT_FAIL_ACK,
+		PACKET_SOCKS5_RULESET_DENIED,
+		PACKET_SOCKS5_RULESET_DENIED_ACK,
+		PACKET_SOCKS5_NETWORK_UNREACHABLE,
+		PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+		PACKET_SOCKS5_HOST_UNREACHABLE,
+		PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+		PACKET_SOCKS5_CONNECTION_REFUSED,
+		PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+		PACKET_SOCKS5_TTL_EXPIRED,
+		PACKET_SOCKS5_TTL_EXPIRED_ACK,
+		PACKET_SOCKS5_COMMAND_UNSUPPORTED,
+		PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+		PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED,
+		PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+		PACKET_SOCKS5_AUTH_FAILED,
+		PACKET_SOCKS5_AUTH_FAILED_ACK,
+		PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
+		PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+		PACKET_SOCKS5_CONNECTED,
+		PACKET_SOCKS5_CONNECTED_ACK,
+		PACKET_PACKED_CONTROL_BLOCKS,
+		PACKET_ERROR_DROP,
+		PACKET_PING,
+		PACKET_PONG:
+		return packetIdentitySeq(streamID, t, sequenceNum)
+
+	// Session control packets should have at most one queued copy per stream owner.
+	case PACKET_SESSION_CLOSE,
+		PACKET_SESSION_BUSY:
+		return PacketTypeStreamKey(streamID, t)
+
+	default:
+		return packetIdentitySeqFrag(streamID, t, sequenceNum, fragmentID)
+	}
+}
+
+// PacketTypeStreamKey builds a coarser identity for cases where the packet type is unique
+// per stream and sequence/fragment should be ignored, such as orphan fallback resets.
+func PacketTypeStreamKey(streamID uint16, packetType uint8) uint64 {
+	return uint64(streamID)<<40 | uint64(normalizeIdentityPacketType(packetType))<<32
+}
+
+func packetIdentitySeq(streamID uint16, packetType uint8, sequenceNum uint16) uint64 {
+	return uint64(streamID)<<40 | uint64(packetType)<<32 | uint64(sequenceNum)<<8
+}
+
+func packetIdentitySeqFrag(streamID uint16, packetType uint8, sequenceNum uint16, fragmentID uint8) uint64 {
+	return uint64(streamID)<<40 | uint64(packetType)<<32 | uint64(sequenceNum)<<8 | uint64(fragmentID)
+}
+
+func normalizeIdentityPacketType(packetType uint8) uint8 {
+	switch packetType {
+	case PACKET_STREAM_RESEND:
+		return PACKET_STREAM_DATA
+	default:
+		return packetType
+	}
+}

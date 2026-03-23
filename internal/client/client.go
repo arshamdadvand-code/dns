@@ -23,6 +23,7 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/mlq"
 	"masterdnsvpn-go/internal/security"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
@@ -99,9 +100,7 @@ type Client struct {
 	streamsMu      sync.RWMutex
 	active_streams map[uint16]*Stream_client
 	last_stream_id uint16
-	orphanMu       sync.Mutex
-	orphanPackets  []VpnProto.Packet
-	orphanIndex    map[uint32]int
+	orphanQueue    *mlq.MultiLevelQueue[VpnProto.Packet]
 
 	// Signal to wake up dispatcher
 	txSignal chan struct{}
@@ -310,7 +309,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		txChannel:            make(chan asyncPacket, 1024),
 		rxChannel:            make(chan asyncReadPacket, 1024),
 		active_streams:       make(map[uint16]*Stream_client),
-		orphanIndex:          make(map[uint32]int),
 		txSignal:             make(chan struct{}, 1),
 
 		// DNS Management
@@ -323,6 +321,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		localDNSCachePersist:   cfg.LocalDNSCachePersist,
 		localDNSCachePath:      cfg.LocalDNSCachePath(),
 		localDNSCacheFlushTick: time.Duration(cfg.LocalDNSCacheFlushSec) * time.Second,
+		orphanQueue:            mlq.New[VpnProto.Packet](8),
 	}
 	c.pingManager = newPingManager(c)
 	return c
