@@ -247,3 +247,45 @@ func TestTerminalAckTimeoutEventuallyClosesStream(t *testing.T) {
 		return a.IsClosed()
 	}, "expected stream to close after terminal ack timeout")
 }
+
+func TestDataPacketTTLExpiryQueuesRST(t *testing.T) {
+	enq := &recordingEnqueuer{}
+	a := NewARQ(6, 1, enq, nil, 1200, nil, Config{
+		IsClient:               false,
+		WindowSize:             64,
+		RTO:                    0.05,
+		MaxRTO:                 0.2,
+		TerminalAckWaitTimeout: 30.0,
+	})
+	a.Start()
+	defer a.ForceClose("test cleanup")
+
+	a.InjectOutboundDataWithTTL([]byte("ttl-data"), 50*time.Millisecond)
+
+	waitUntil(t, time.Second, func() bool {
+		return enq.has(Enums.PACKET_STREAM_RST)
+	}, "expected TTL-expired data packet to trigger terminal RST")
+}
+
+func TestRSTPacketTTLExpiryHardClosesStream(t *testing.T) {
+	enq := &recordingEnqueuer{}
+	a := NewARQ(7, 1, enq, nil, 1200, nil, Config{
+		IsClient:                 true,
+		WindowSize:               64,
+		RTO:                      0.05,
+		MaxRTO:                   0.2,
+		EnableControlReliability: true,
+		ControlRTO:               0.05,
+		ControlMaxRTO:            0.2,
+		ControlMaxRetries:        10,
+	})
+	a.Start()
+
+	if !a.SendControlPacketWithTTL(Enums.PACKET_STREAM_RST, 0, 0, 0, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RST), true, nil, 50*time.Millisecond) {
+		t.Fatal("expected STREAM_RST with TTL to be queued")
+	}
+
+	waitUntil(t, time.Second, func() bool {
+		return a.IsClosed()
+	}, "expected TTL-expired RST packet to hard-close stream")
+}

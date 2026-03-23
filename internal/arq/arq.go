@@ -233,7 +233,7 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 
 		inactivityTimeout:    time.Duration(maxF(120.0, cfg.InactivityTimeout) * float64(time.Second)),
 		dataPacketTTL:        time.Duration(maxF(120.0, cfg.DataPacketTTL) * float64(time.Second)),
-		maxDataRetries:       maxI(20, cfg.MaxDataRetries),
+		maxDataRetries:       maxI(60, cfg.MaxDataRetries),
 		finDrainTimeout:      time.Duration(maxF(30.0, cfg.FinDrainTimeout) * float64(time.Second)),
 		gracefulDrainTimeout: time.Duration(maxF(60.0, cfg.GracefulDrainTimeout) * float64(time.Second)),
 		terminalDrainTimeout: time.Duration(maxF(60.0, cfg.TerminalDrainTimeout) * float64(time.Second)),
@@ -394,6 +394,10 @@ func (a *ARQ) MarkSocksFailed(errCode uint8) {
 }
 
 func (a *ARQ) InjectOutboundData(data []byte) {
+	a.InjectOutboundDataWithTTL(data, 0)
+}
+
+func (a *ARQ) InjectOutboundDataWithTTL(data []byte, ttl time.Duration) {
 	if len(data) == 0 || a.isClosed() {
 		return
 	}
@@ -417,14 +421,14 @@ func (a *ARQ) InjectOutboundData(data []byte) {
 			Retries:         0,
 			CurrentRTO:      a.rto,
 			CompressionType: a.compressionType,
-			TTL:             0,
+			TTL:             ttl,
 		}
 		if len(a.sndBuf) >= a.limit {
 			a.clearWindowNotFull()
 		}
 		a.mu.Unlock()
 
-		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, 0, chunk)
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA), Enums.PACKET_STREAM_DATA, sn, 0, 0, a.compressionType, ttl, chunk)
 		offset = end
 	}
 }
@@ -905,6 +909,7 @@ func (a *ARQ) emitTerminalPacket(packetType uint8, reason string) {
 		a.mu.Unlock()
 		return
 	}
+
 	a.closeReason = reason
 	a.stopLocalRead = true
 	a.deferredClose = false
@@ -1163,9 +1168,13 @@ func (a *ARQ) ReceiveAck(sn uint16) bool {
 // ---------------------------------------------------------------------
 
 func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte, priority int, trackForAck bool, customAckType *uint8) bool {
+	return a.SendControlPacketWithTTL(packetType, sequenceNum, fragmentID, totalFragments, payload, priority, trackForAck, customAckType, 0)
+}
+
+func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte, priority int, trackForAck bool, customAckType *uint8, ttl time.Duration) bool {
 	copyData := append([]byte(nil), payload...)
 	priority = Enums.NormalizePacketPriority(packetType, priority)
-	ok := a.enqueuer.PushTXPacket(priority, packetType, sequenceNum, fragmentID, totalFragments, 0, 0, copyData)
+	ok := a.enqueuer.PushTXPacket(priority, packetType, sequenceNum, fragmentID, totalFragments, 0, ttl, copyData)
 	if !ok {
 		return false
 	}
@@ -1215,10 +1224,19 @@ func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID
 		LastSentAt:     now,
 		Retries:        0,
 		CurrentRTO:     initialRTO,
-		TTL:            0,
+		TTL:            ttl,
 	}
 
 	return true
+}
+
+func (a *ARQ) handleTrackedPacketTTLExpiry(packetType uint8, reason string) {
+	if packetType == Enums.PACKET_STREAM_RST {
+		a.finalizeClose(reason)
+		return
+	}
+
+	a.emitTerminalPacket(Enums.PACKET_STREAM_RST, reason)
 }
 
 func (a *ARQ) ReceiveControlAck(ackPacketType uint8, sequenceNum uint16, fragmentID uint8) bool {
@@ -1329,7 +1347,13 @@ func (a *ARQ) checkRetransmits() {
 	var jobs []rtxJob
 
 	for sn, info := range a.sndBuf {
-		if now.Sub(info.CreatedAt) >= a.dataPacketTTL && info.Retries >= a.maxDataRetries {
+		if info.TTL > 0 {
+			if now.Sub(info.CreatedAt) >= info.TTL {
+				a.mu.Unlock()
+				a.handleTrackedPacketTTLExpiry(Enums.PACKET_STREAM_DATA, "Packet TTL expired")
+				return
+			}
+		} else if now.Sub(info.CreatedAt) >= a.dataPacketTTL && info.Retries >= a.maxDataRetries {
 			a.mu.Unlock()
 			a.Abort("Max retransmissions exceeded", true)
 			return
@@ -1360,21 +1384,35 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 	defer a.mu.Unlock()
 
 	for key, info := range a.controlSndBuf {
-		maxRetries := a.controlMaxRetries
-		packetTTL := a.controlPacketTTL
-
-		if setupControlPacketTypes[info.PacketType] {
-			if maxRetries < 120 {
-				maxRetries = 120
+		if info.TTL > 0 {
+			if now.Sub(info.CreatedAt) >= info.TTL {
+				delete(a.controlSndBuf, key)
+				a.mu.Unlock()
+				a.handleTrackedPacketTTLExpiry(info.PacketType, "Packet TTL expired")
+				a.mu.Lock()
+				return
 			}
-			if packetTTL < 300*time.Second {
-				packetTTL = 300 * time.Second
+		} else {
+			maxRetries := a.controlMaxRetries
+			packetTTL := a.controlPacketTTL
+
+			if setupControlPacketTypes[info.PacketType] {
+				if maxRetries < 120 {
+					maxRetries = 120
+				}
+				if packetTTL < 300*time.Second {
+					packetTTL = 300 * time.Second
+				}
+			}
+
+			if now.Sub(info.CreatedAt) >= packetTTL || info.Retries >= maxRetries {
+				delete(a.controlSndBuf, key)
+				continue
 			}
 		}
 
-		if now.Sub(info.CreatedAt) >= packetTTL || info.Retries >= maxRetries {
-			delete(a.controlSndBuf, key)
-			continue
+		if info.TTL == 0 {
+			// no-op: legacy retry ownership remains active for non-TTL packets
 		}
 
 		if now.Sub(info.LastSentAt) < info.CurrentRTO {
