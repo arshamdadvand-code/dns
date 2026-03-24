@@ -108,27 +108,25 @@ type ARQ struct {
 	closeReason  string
 	lastActivity time.Time
 
-	finSent        bool
-	finReceived    bool
-	finAcked       bool
-	finSeqSent     *uint16
-	finSeqReceived *uint16
+	finSent     bool
+	finReceived bool
+	finAcked    bool
+	finSeqSent  *uint16
 
 	rstReceived bool
 	rstSent     bool
 	rstAcked    bool
 	rstSeqSent  *uint16
 
-	localWriteClosed  bool
-	remoteWriteClosed bool
-	stopLocalRead     bool
-	deferredClose     bool
-	deferredReason    string
-	deferredDeadline  time.Time
-	deferredPacket    uint8
-	waitingAck        bool
-	waitingAckFor     uint8
-	ackWaitDeadline   time.Time
+	localWriteClosed bool
+	stopLocalRead    bool
+	deferredClose    bool
+	deferredReason   string
+	deferredDeadline time.Time
+	deferredPacket   uint8
+	waitingAck       bool
+	waitingAckFor    uint8
+	ackWaitDeadline  time.Time
 
 	// Backpressure
 	windowSize    int
@@ -142,8 +140,6 @@ type ARQ struct {
 	inactivityTimeout    time.Duration
 	dataPacketTTL        time.Duration
 	maxDataRetries       int
-	finDrainTimeout      time.Duration
-	gracefulDrainTimeout time.Duration
 	terminalDrainTimeout time.Duration
 	terminalAckWait      time.Duration
 
@@ -154,9 +150,7 @@ type ARQ struct {
 	controlMaxRetries        int
 	controlPacketTTL         time.Duration
 
-	// SOCKS pre-connection payload handling
-	isSocks   bool
-	isClient  bool
+	// Virtual streams do not emit local close side effects.
 	isVirtual bool
 
 	// Concurrency
@@ -175,8 +169,6 @@ type Config struct {
 	WindowSize               int
 	RTO                      float64
 	MaxRTO                   float64
-	IsSocks                  bool
-	IsClient                 bool
 	IsVirtual                bool
 	StartPaused              bool
 	EnableControlReliability bool
@@ -187,8 +179,6 @@ type Config struct {
 	DataPacketTTL            float64
 	MaxDataRetries           int
 	ControlPacketTTL         float64
-	FinDrainTimeout          float64
-	GracefulDrainTimeout     float64
 	TerminalDrainTimeout     float64
 	TerminalAckWaitTimeout   float64
 	CompressionType          uint8
@@ -249,8 +239,6 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		inactivityTimeout:    time.Duration(maxF(120.0, cfg.InactivityTimeout) * float64(time.Second)),
 		dataPacketTTL:        time.Duration(maxF(120.0, cfg.DataPacketTTL) * float64(time.Second)),
 		maxDataRetries:       maxI(60, cfg.MaxDataRetries),
-		finDrainTimeout:      time.Duration(maxF(120.0, cfg.FinDrainTimeout) * float64(time.Second)),
-		gracefulDrainTimeout: time.Duration(maxF(60.0, cfg.GracefulDrainTimeout) * float64(time.Second)),
 		terminalDrainTimeout: time.Duration(maxF(60.0, cfg.TerminalDrainTimeout) * float64(time.Second)),
 		terminalAckWait:      time.Duration(maxF(30.0, cfg.TerminalAckWaitTimeout) * float64(time.Second)),
 
@@ -258,8 +246,6 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		controlMaxRetries:        maxI(5, cfg.ControlMaxRetries),
 		controlPacketTTL:         time.Duration(maxF(120.0, cfg.ControlPacketTTL) * float64(time.Second)),
 
-		isSocks:         cfg.IsSocks,
-		isClient:        cfg.IsClient,
 		isVirtual:       cfg.IsVirtual,
 		compressionType: cfg.CompressionType,
 	}
@@ -376,13 +362,6 @@ func maxI(x, y int) int {
 	return y
 }
 
-func maxDuration(x, y time.Duration) time.Duration {
-	if x > y {
-		return x
-	}
-	return y
-}
-
 // ---------------------------------------------------------------------
 // Flow Control & Shared State Helpers
 // ---------------------------------------------------------------------
@@ -435,9 +414,7 @@ func (a *ARQ) finReceivedLocked() bool {
 }
 
 func (a *ARQ) isClosed() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.closed
+	return a.IsClosed()
 }
 
 // clearAllQueues is used to wipe state instantly (RST / Abort semantics)
@@ -610,7 +587,7 @@ func (a *ARQ) ioLoop() {
 		a.mu.Unlock()
 
 		if c, ok := a.localConn.(interface{ SetReadDeadline(time.Time) error }); ok {
-			_ = c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+			_ = c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		}
 
 		n, err := a.localConn.Read(buf)
@@ -681,6 +658,9 @@ func (a *ARQ) ioLoop() {
 // Terminal Emit / Drain Helpers
 // ---------------------------------------------------------------------
 
+// deferTerminalPacket arms a drain-before-terminal phase.
+// It stops new local reads, waits for pending outbound data to drain,
+// then `settleTerminalDrain` decides whether to emit FIN or fall back to RST.
 func (a *ARQ) deferTerminalPacket(reason string, packetType uint8) {
 	a.mu.Lock()
 	if a.closed || a.isVirtual {
@@ -701,6 +681,7 @@ func (a *ARQ) deferTerminalPacket(reason string, packetType uint8) {
 	if a.deferredDeadline.IsZero() || deadline.After(a.deferredDeadline) {
 		a.deferredDeadline = deadline
 	}
+
 	sndBufLen := len(a.sndBuf)
 	a.mu.Unlock()
 
@@ -709,6 +690,7 @@ func (a *ARQ) deferTerminalPacket(reason string, packetType uint8) {
 	}
 }
 
+// settleTerminalDrain completes a previously deferred terminal close.
 func (a *ARQ) settleTerminalDrain() {
 	var (
 		packetType uint8
@@ -826,10 +808,7 @@ func (a *ARQ) retransmitLoop() {
 
 		interval := baseInterval
 		if !hasPending {
-			interval = baseInterval * 4
-			if interval < 200*time.Millisecond {
-				interval = 200 * time.Millisecond
-			}
+			interval = max(baseInterval*4, 200*time.Millisecond)
 		}
 
 		timer := time.NewTimer(interval)
@@ -860,7 +839,7 @@ func (a *ARQ) retransmitLoop() {
 // Data Plane
 // ---------------------------------------------------------------------
 
-// // ReceiveData handles inbound STREAM_DATA and emit STREAM_DATA_ACK.
+// ReceiveData handles inbound STREAM_DATA and emit STREAM_DATA_ACK.
 func (a *ARQ) ReceiveData(sn uint16, data []byte) {
 	if a.isClosed() || a.IsReset() {
 		return
@@ -957,6 +936,7 @@ func (a *ARQ) writeLoop() {
 				a.writeLock.Unlock()
 
 				if err != nil {
+					// Maybe we can later do drain before sending RST if thats server not client
 					a.Close("Local App Closed Connection (writer closed)", CloseOptions{SendRST: true})
 					return
 				}
@@ -972,9 +952,6 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 	a.lastActivity = time.Now()
 	handled := false
 
-	if packetType == Enums.PACKET_STREAM_FIN_ACK || packetType == Enums.PACKET_STREAM_RST_ACK {
-
-	}
 	if _, exists := a.sndBuf[sn]; exists {
 		delete(a.sndBuf, sn)
 		if len(a.sndBuf) < a.limit {
@@ -1069,6 +1046,34 @@ func (a *ARQ) handleTrackedPacketTTLExpiry(packetType uint8, reason string) {
 	a.Close(reason, CloseOptions{SendRST: true})
 }
 
+func (a *ARQ) handleTrackedTerminalAck(originPtype uint8) bool {
+	if _, ok := Enums.GetPacketCloseStream(originPtype); ok &&
+		originPtype != Enums.PACKET_STREAM_FIN &&
+		originPtype != Enums.PACKET_STREAM_RST {
+		a.finalizeClose(fmt.Sprintf("%s acknowledged", Enums.PacketTypeName(originPtype)))
+		return true
+	}
+
+	return false
+}
+
+func (a *ARQ) handleWaitingTerminalAck(ackPacketType uint8, isWaitingFin bool, isWaitingRst bool) bool {
+	if ackPacketType == Enums.PACKET_STREAM_FIN_ACK && isWaitingFin {
+		a.markFinAcked()
+		a.clearWaitingAck(Enums.PACKET_STREAM_FIN)
+		a.tryFinalizeRemoteEOF()
+		return true
+	}
+
+	if ackPacketType == Enums.PACKET_STREAM_RST_ACK && isWaitingRst {
+		a.markRstAcked()
+		a.finalizeClose("RST acknowledged")
+		return true
+	}
+
+	return false
+}
+
 func (a *ARQ) ReceiveControlAck(ackPacketType uint8, sequenceNum uint16, fragmentID uint8) bool {
 	a.mu.Lock()
 	a.lastActivity = time.Now()
@@ -1095,23 +1100,11 @@ func (a *ARQ) ReceiveControlAck(ackPacketType uint8, sequenceNum uint16, fragmen
 	}
 	a.mu.Unlock()
 
-	if tracked {
-		if _, ok := Enums.GetPacketCloseStream(originPtype); ok && originPtype != Enums.PACKET_STREAM_FIN && originPtype != Enums.PACKET_STREAM_RST {
-			a.finalizeClose(fmt.Sprintf("%s acknowledged", Enums.PacketTypeName(originPtype)))
-			return true
-		}
-	}
-
-	if ackPacketType == Enums.PACKET_STREAM_FIN_ACK && isWaitingFin {
-		a.markFinAcked()
-		a.clearWaitingAck(Enums.PACKET_STREAM_FIN)
-		a.tryFinalizeRemoteEOF()
+	if tracked && a.handleTrackedTerminalAck(originPtype) {
 		return true
 	}
 
-	if ackPacketType == Enums.PACKET_STREAM_RST_ACK && isWaitingRst {
-		a.markRstAcked()
-		a.finalizeClose("RST acknowledged")
+	if a.handleWaitingTerminalAck(ackPacketType, isWaitingFin, isWaitingRst) {
 		return true
 	}
 
@@ -1370,6 +1363,11 @@ func (a *ARQ) finalizeClose(reason string) {
 	)
 }
 
+// Close is the single close entrypoint for this ARQ stream.
+// Modes are expressed through options:
+// - Force: finalize immediately
+// - SendFIN: graceful close, optionally after drain
+// - SendRST: reset close, optionally after drain
 func (a *ARQ) Close(reason string, opts CloseOptions) {
 	if a.isVirtual && !opts.Force {
 		return
