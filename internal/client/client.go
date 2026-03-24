@@ -349,7 +349,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		}
 	default:
 		handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
-		if handledAck && (Enums.IsPacketCloseStream(packet.PacketType) || packet.PacketType == Enums.PACKET_STREAM_DATA_ACK) {
+		if _, ok := Enums.GetPacketCloseStream(packet.PacketType); handledAck && ok {
 			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
 				s.MarkTerminal(time.Now())
 				if s.StatusValue() != streamStatusCancelled {

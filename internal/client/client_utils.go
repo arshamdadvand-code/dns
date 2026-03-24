@@ -203,7 +203,7 @@ func (c *Client) consumeInboundStreamAck(packetType uint8, packet VpnProto.Packe
 
 	handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
 
-	if handledAck && (Enums.IsPacketCloseStream(packet.PacketType) || packet.PacketType == Enums.PACKET_STREAM_FIN_ACK) {
+	if _, ok := Enums.GetPacketCloseStream(packet.PacketType); handledAck && ok {
 		if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
 			s.MarkTerminal(time.Now())
 			if s.StatusValue() != streamStatusCancelled {
@@ -236,12 +236,11 @@ func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) bool {
 		return true
 	}
 
-	switch packet.PacketType {
-	case Enums.PACKET_STREAM_FIN:
-		c.enqueueOrphanReset(Enums.PACKET_STREAM_FIN_ACK, packet.StreamID, packet.SequenceNum)
-	case Enums.PACKET_STREAM_RST:
-		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST_ACK, packet.StreamID, packet.SequenceNum)
-	default:
+	// GetPacketCloseStream
+	ack_answer, ok := Enums.GetPacketCloseStream(packet.PacketType)
+	if ok {
+		c.enqueueOrphanReset(ack_answer, packet.StreamID, 0)
+	} else {
 		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
 	}
 
