@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
+	"masterdnsvpn-go/internal/config"
 	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/mlq"
@@ -145,5 +146,61 @@ func TestCleanupTerminalStreamsAbortsAndRemovesExpiredStreams(t *testing.T) {
 	}
 	if !record.isRecentlyClosed(2, time.Now()) {
 		t.Fatalf("expected stream to be tracked as recently closed")
+	}
+}
+
+func TestDequeueSessionResponseDuplicatesLastPackedControlBlock(t *testing.T) {
+	s := &Server{
+		cfg: config.ServerConfig{
+			PacketBlockControlDuplication: 3,
+		},
+		sessions: newSessionStore(8, 32),
+	}
+
+	record := newTestSessionRecord(12)
+	record.MaxPackedBlocks = 2
+	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
+	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_SYN_ACK), Enums.PACKET_STREAM_SYN_ACK, 11, 0, 0, 0, 0, nil) {
+		t.Fatalf("expected first control packet to queue")
+	}
+	if !stream.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_FIN_ACK), Enums.PACKET_STREAM_FIN_ACK, 12, 0, 0, 0, 0, nil) {
+		t.Fatalf("expected second control packet to queue")
+	}
+
+	s.sessions.byID[record.ID] = record
+
+	first, ok := s.dequeueSessionResponse(record.ID, time.Now())
+	if !ok || first == nil {
+		t.Fatalf("expected first dequeue to return a packet")
+	}
+	if first.PacketType != Enums.PACKET_PACKED_CONTROL_BLOCKS {
+		t.Fatalf("expected packed control blocks packet, got %d", first.PacketType)
+	}
+	if len(first.Payload) != 2*VpnProto.PackedControlBlockSize {
+		t.Fatalf("unexpected packed payload size: got=%d want=%d", len(first.Payload), 2*VpnProto.PackedControlBlockSize)
+	}
+
+	second, ok := s.dequeueSessionResponse(record.ID, time.Now())
+	if !ok || second == nil {
+		t.Fatalf("expected duplicated dequeue to return cached packet")
+	}
+	if second.PacketType != Enums.PACKET_PACKED_CONTROL_BLOCKS || string(second.Payload) != string(first.Payload) {
+		t.Fatalf("expected second dequeue to return duplicated packed block")
+	}
+
+	third, ok := s.dequeueSessionResponse(record.ID, time.Now())
+	if !ok || third == nil {
+		t.Fatalf("expected final duplicated dequeue to return cached packet")
+	}
+	if third.PacketType != Enums.PACKET_PACKED_CONTROL_BLOCKS || string(third.Payload) != string(first.Payload) {
+		t.Fatalf("expected third dequeue to return duplicated packed block")
+	}
+
+	if record.LastPackedControlBlock != nil || record.LastPackedControlBlockRemaining != 0 {
+		t.Fatalf("expected packed block duplication cache to be drained")
+	}
+
+	if _, ok := s.dequeueSessionResponse(record.ID, time.Now()); ok {
+		t.Fatalf("expected no more queued packets after cached duplicates are exhausted")
 	}
 }

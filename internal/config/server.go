@@ -43,6 +43,7 @@ type ServerConfig struct {
 	SessionCleanupIntervalSecs        float64  `toml:"SESSION_CLEANUP_INTERVAL_SECONDS"`
 	ClosedSessionRetentionSecs        float64  `toml:"CLOSED_SESSION_RETENTION_SECONDS"`
 	MaxPacketsPerBatch                int      `toml:"MAX_PACKETS_PER_BATCH"`
+	PacketBlockControlDuplication     int      `toml:"PACKET_BLOCK_CONTROL_DUPLICATION"`
 	DNSUpstreamServers                []string `toml:"DNS_UPSTREAM_SERVERS"`
 	DNSUpstreamTimeoutSecs            float64  `toml:"DNS_UPSTREAM_TIMEOUT"`
 	SOCKSConnectTimeoutSecs           float64  `toml:"SOCKS_CONNECT_TIMEOUT"`
@@ -103,6 +104,7 @@ func defaultServerConfig() ServerConfig {
 		SessionCleanupIntervalSecs:        30.0,
 		ClosedSessionRetentionSecs:        600.0,
 		MaxPacketsPerBatch:                8,
+		PacketBlockControlDuplication:     1,
 		DNSUpstreamServers:                []string{"1.1.1.1:53"},
 		DNSUpstreamTimeoutSecs:            4.0,
 		SOCKSConnectTimeoutSecs:           8.0,
@@ -181,15 +183,19 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DeferredSessionWorkers < 0 {
 		cfg.DeferredSessionWorkers = 0
 	}
-	if cfg.DeferredSessionWorkers > 64 {
-		cfg.DeferredSessionWorkers = 64
+
+	if cfg.DeferredSessionWorkers > 128 {
+		cfg.DeferredSessionWorkers = 128
 	}
+
 	if cfg.DeferredSessionQueueLimit < 1 {
 		cfg.DeferredSessionQueueLimit = 256
 	}
-	if cfg.DeferredSessionQueueLimit > 8192 {
-		cfg.DeferredSessionQueueLimit = 8192
+
+	if cfg.DeferredSessionQueueLimit > 14336 {
+		cfg.DeferredSessionQueueLimit = 14336
 	}
+
 	cfg.SessionOrphanQueueInitialCap = clampInt(defaultIntBelow(cfg.SessionOrphanQueueInitialCap, 1, 64), 4, 4096)
 	cfg.StreamQueueInitialCapacity = clampInt(defaultIntBelow(cfg.StreamQueueInitialCapacity, 1, 128), 8, 65536)
 	cfg.DNSFragmentStoreCapacity = clampInt(defaultIntBelow(cfg.DNSFragmentStoreCapacity, 1, 256), 16, 16384)
@@ -203,54 +209,79 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DropLogIntervalSecs <= 0 {
 		cfg.DropLogIntervalSecs = 2.0
 	}
+
 	if cfg.InvalidCookieWindowSecs <= 0 {
 		cfg.InvalidCookieWindowSecs = 2.0
 	}
+
 	if cfg.InvalidCookieErrorThreshold <= 0 {
 		cfg.InvalidCookieErrorThreshold = 10
 	}
+
 	if cfg.SessionTimeoutSecs <= 0 {
 		cfg.SessionTimeoutSecs = 300.0
 	}
+
 	if cfg.SessionCleanupIntervalSecs <= 0 {
 		cfg.SessionCleanupIntervalSecs = 30.0
 	}
+
 	if cfg.ClosedSessionRetentionSecs <= 0 {
 		cfg.ClosedSessionRetentionSecs = 600.0
 	}
+
 	if cfg.MaxPacketsPerBatch < 1 {
 		cfg.MaxPacketsPerBatch = 20
 	}
+
+	if cfg.PacketBlockControlDuplication < 1 {
+		cfg.PacketBlockControlDuplication = 1
+	}
+
+	if cfg.PacketBlockControlDuplication > 16 {
+		cfg.PacketBlockControlDuplication = 16
+	}
+
 	if len(cfg.DNSUpstreamServers) == 0 {
 		cfg.DNSUpstreamServers = []string{"1.1.1.1:53"}
 	}
+
 	if cfg.DNSUpstreamTimeoutSecs <= 0 {
 		cfg.DNSUpstreamTimeoutSecs = 4.0
 	}
+
 	if cfg.SOCKSConnectTimeoutSecs <= 0 {
 		cfg.SOCKSConnectTimeoutSecs = 8.0
 	}
+
 	if cfg.DNSFragmentAssemblyTimeoutSecs <= 0 {
 		cfg.DNSFragmentAssemblyTimeoutSecs = 300.0
 	}
+
 	if cfg.DNSCacheMaxRecords < 1 {
 		cfg.DNSCacheMaxRecords = 2000
 	}
+
 	if cfg.DNSCacheTTLSeconds <= 0 {
 		cfg.DNSCacheTTLSeconds = 3600.0
 	}
+
 	if cfg.ForwardPort < 0 || cfg.ForwardPort > 65535 {
 		return cfg, fmt.Errorf("invalid FORWARD_PORT: %d", cfg.ForwardPort)
 	}
+
 	if len(cfg.SOCKS5User) > 255 {
 		return cfg, fmt.Errorf("SOCKS5_USER cannot exceed 255 bytes")
 	}
+
 	if len(cfg.SOCKS5Pass) > 255 {
 		return cfg, fmt.Errorf("SOCKS5_PASS cannot exceed 255 bytes")
 	}
+
 	if cfg.SOCKS5Auth && (cfg.SOCKS5User == "" || cfg.SOCKS5Pass == "") {
 		return cfg, fmt.Errorf("SOCKS5_AUTH requires both SOCKS5_USER and SOCKS5_PASS")
 	}
+
 	if cfg.UseExternalSOCKS5 {
 		if cfg.ForwardIP == "" {
 			return cfg, fmt.Errorf("USE_EXTERNAL_SOCKS5 requires FORWARD_IP")
@@ -263,6 +294,7 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.MinVPNLabelLength <= 0 {
 		cfg.MinVPNLabelLength = 3
 	}
+
 	cfg.SupportedUploadCompressionTypes = normalizeCompressionTypeList(cfg.SupportedUploadCompressionTypes)
 	cfg.SupportedDownloadCompressionTypes = normalizeCompressionTypeList(cfg.SupportedDownloadCompressionTypes)
 

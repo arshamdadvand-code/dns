@@ -245,6 +245,10 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	record.mu.Lock()
 	defer record.mu.Unlock()
 
+	if pkt, ok := s.dequeueDuplicatedPackedControlBlock(record); ok {
+		return pkt, true
+	}
+
 	record.StreamsMu.RLock()
 	streamCount := len(record.ActiveStreams)
 	ids := make([]int32, 0, streamCount+1)
@@ -313,7 +317,9 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 		if ok && item != nil {
 			record.RRStreamID = id + 1
 			if VpnProto.IsPackableControlPacket(item.PacketType, len(item.Payload)) && record.MaxPackedBlocks > 1 {
-				return s.packControlBlocks(record, item, id, selectedStreamID), true
+				pkt := s.packControlBlocks(record, item, id, selectedStreamID)
+				s.cachePackedControlBlockDuplicate(record, pkt)
+				return pkt, true
 			}
 			pkt := vpnPacketFromTX(item, selectedStreamID)
 			return &pkt, true
@@ -321,6 +327,44 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	}
 
 	return nil, false
+}
+
+func cloneVPNPacket(packet *VpnProto.Packet) *VpnProto.Packet {
+	if packet == nil {
+		return nil
+	}
+	cloned := *packet
+	if len(packet.Payload) > 0 {
+		cloned.Payload = append([]byte(nil), packet.Payload...)
+	}
+	return &cloned
+}
+
+func (s *Server) dequeueDuplicatedPackedControlBlock(record *sessionRecord) (*VpnProto.Packet, bool) {
+	if s == nil || record == nil || record.LastPackedControlBlock == nil || record.LastPackedControlBlockRemaining <= 0 {
+		return nil, false
+	}
+	packet := cloneVPNPacket(record.LastPackedControlBlock)
+	record.LastPackedControlBlockRemaining--
+	if record.LastPackedControlBlockRemaining <= 0 {
+		record.LastPackedControlBlock = nil
+		record.LastPackedControlBlockRemaining = 0
+	}
+	return packet, packet != nil
+}
+
+func (s *Server) cachePackedControlBlockDuplicate(record *sessionRecord, packet *VpnProto.Packet) {
+	if s == nil || record == nil {
+		return
+	}
+	duplication := s.cfg.PacketBlockControlDuplication
+	if duplication <= 1 || packet == nil || packet.PacketType != Enums.PACKET_PACKED_CONTROL_BLOCKS {
+		record.LastPackedControlBlock = nil
+		record.LastPackedControlBlockRemaining = 0
+		return
+	}
+	record.LastPackedControlBlock = cloneVPNPacket(packet)
+	record.LastPackedControlBlockRemaining = duplication - 1
 }
 
 func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXPacket, initialID int32, initialStreamID uint16) *VpnProto.Packet {

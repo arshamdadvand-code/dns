@@ -53,8 +53,8 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 RESOLVER_BALANCING_STRATEGY = 0
 
 # Profile tuned for very lossy links with many resolvers.
-PACKET_DUPLICATION_COUNT = 3
-SETUP_PACKET_DUPLICATION_COUNT = 5
+PACKET_DUPLICATION_COUNT = 2
+SETUP_PACKET_DUPLICATION_COUNT = 2
 
 # DATA/RESEND stick to a preferred resolver per stream.
 # If too many resend rounds hit the same resolver, the preferred resolver can fail over.
@@ -64,13 +64,13 @@ STREAM_RESOLVER_FAILOVER_COOLDOWN = 1.0
 # Background resolver health management.
 # Inactive resolvers from MTU scan are rechecked in the background using the synced MTUs.
 RECHECK_INACTIVE_SERVERS_ENABLED = true
-RECHECK_INACTIVE_INTERVAL_SECONDS = 1800.0
+RECHECK_INACTIVE_INTERVAL_SECONDS = 300.0
 RECHECK_SERVER_INTERVAL_SECONDS = 3.0
 RECHECK_BATCH_SIZE = 5
 
 # If a resolver only times out across this whole window, disable it at runtime.
 AUTO_DISABLE_TIMEOUT_SERVERS = true
-AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 180.0
+AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 120.0
 AUTO_DISABLE_MIN_OBSERVATIONS = 6
 AUTO_DISABLE_CHECK_INTERVAL_SECONDS = 3.0
 

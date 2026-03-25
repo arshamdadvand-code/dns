@@ -63,14 +63,16 @@ type sessionRecord struct {
 	lastActivityUnixNano int64
 
 	// New fields for ARQ refactor
-	Streams        map[uint16]*Stream_server
-	ActiveStreams  []uint16 // Sorted list of active stream IDs for Round-Robin
-	RRStreamID     int32    // Last served stream ID for RR
-	EnqueueSeq     uint64   // Global sequence for FIFO inside same priority
-	StreamQueueCap int
-	StreamsMu      sync.RWMutex
-	RecentlyClosed map[uint16]time.Time
-	OrphanQueue    *mlq.MultiLevelQueue[VpnProto.Packet]
+	Streams                         map[uint16]*Stream_server
+	ActiveStreams                   []uint16 // Sorted list of active stream IDs for Round-Robin
+	RRStreamID                      int32    // Last served stream ID for RR
+	EnqueueSeq                      uint64   // Global sequence for FIFO inside same priority
+	StreamQueueCap                  int
+	StreamsMu                       sync.RWMutex
+	RecentlyClosed                  map[uint16]time.Time
+	OrphanQueue                     *mlq.MultiLevelQueue[VpnProto.Packet]
+	LastPackedControlBlock          *VpnProto.Packet
+	LastPackedControlBlockRemaining int
 }
 
 // serverStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -174,10 +176,10 @@ func newSessionStore(orphanQueueCap int, streamQueueCap int) *sessionStore {
 		streamQueueCap = 32
 	}
 	return &sessionStore{
-		bySig:        make(map[[sessionInitDataSize]byte]uint8, 64),
-		recentClosed: make(map[uint8]closedSessionRecord, 32),
-		cookieIndex:  32,
-		nextID:       1,
+		bySig:          make(map[[sessionInitDataSize]byte]uint8, 64),
+		recentClosed:   make(map[uint8]closedSessionRecord, 32),
+		cookieIndex:    32,
+		nextID:         1,
 		orphanQueueCap: orphanQueueCap,
 		streamQueueCap: streamQueueCap,
 	}
@@ -213,7 +215,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 		return nil, false, ErrSessionTableFull
 	}
 
-		record := &sessionRecord{
+	record := &sessionRecord{
 		ID:             uint8(slot),
 		ResponseMode:   payload[0],
 		CreatedAt:      now,
@@ -225,6 +227,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 		RecentlyClosed: make(map[uint16]time.Time, 8),
 		OrphanQueue:    mlq.New[VpnProto.Packet](s.orphanQueueCap),
 	}
+
 	// Initialize virtual Stream 0 for control packets
 	record.ensureStream0(nil) // Caller should update logger if needed
 	record.reuseUntilUnixNano = record.ReuseUntil.UnixNano()

@@ -89,6 +89,10 @@ ENCRYPTION_KEY_FILE = "encrypt_key.txt"
 # ------------------------------------------------------------------------------
 
 MAX_PACKETS_PER_BATCH = 20
+# Duplicate each packed control block response this many dispatcher turns.
+# 1 = disabled. Useful for lossy links where FIN/RST/SYN-ACK style control blocks
+# should be repeated without re-popping queues.
+PACKET_BLOCK_CONTROL_DUPLICATION = 2
 
 ARQ_WINDOW_SIZE = 600
 ARQ_INITIAL_RTO_SECONDS = 0.5
