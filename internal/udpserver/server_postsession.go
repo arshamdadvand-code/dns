@@ -475,6 +475,7 @@ func (s *Server) handleDNSQueryRequest(vpnPacket VpnProto.Packet, sessionRecord 
 	run := func() {
 		s.processDeferredDNSQuery(
 			vpnPacket.SessionID,
+			vpnPacket.SessionCookie,
 			vpnPacket.SequenceNum,
 			sessionRecord.DownloadCompression,
 			sessionRecord.DownloadMTUBytes,

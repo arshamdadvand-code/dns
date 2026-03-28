@@ -19,9 +19,8 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-func (s *Server) processDeferredDNSQuery(sessionID uint8, sequenceNum uint16, downloadCompression uint8, downloadMTUBytes int, assembledQuery []byte) {
-	lookup, known := s.sessions.Lookup(sessionID)
-	if !known || !s.shouldExecuteDeferredPacket(VpnProto.Packet{SessionID: sessionID, SessionCookie: lookup.Cookie, StreamID: 0}) {
+func (s *Server) processDeferredDNSQuery(sessionID uint8, sessionCookie uint8, sequenceNum uint16, downloadCompression uint8, downloadMTUBytes int, assembledQuery []byte) {
+	if !s.shouldExecuteDeferredPacket(VpnProto.Packet{SessionID: sessionID, SessionCookie: sessionCookie, StreamID: 0}) {
 		return
 	}
 
@@ -41,8 +40,7 @@ func (s *Server) processDeferredDNSQuery(sessionID uint8, sequenceNum uint16, do
 
 	totalFragments := uint8(len(fragments))
 	for fragmentID, fragmentPayload := range fragments {
-		lookup, known := s.sessions.Lookup(sessionID)
-		if !known || !s.shouldExecuteDeferredPacket(VpnProto.Packet{SessionID: sessionID, SessionCookie: lookup.Cookie, StreamID: 0}) {
+		if !s.shouldExecuteDeferredPacket(VpnProto.Packet{SessionID: sessionID, SessionCookie: sessionCookie, StreamID: 0}) {
 			return
 		}
 		_ = s.queueMainSessionPacket(sessionID, VpnProto.Packet{
