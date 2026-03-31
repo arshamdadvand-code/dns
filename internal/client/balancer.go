@@ -150,6 +150,44 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 	return true
 }
 
+func (b *Balancer) SetConnectionMTU(key string, uploadBytes int, uploadChars int, downloadBytes int) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	snap := b.snapshot.Load()
+	if snap == nil {
+		return false
+	}
+
+	idx, ok := snap.indexByKey[key]
+	if !ok || idx < 0 || idx >= len(snap.connections) {
+		return false
+	}
+
+	conn := snap.connections[idx]
+	conn.UploadMTUBytes = uploadBytes
+	conn.UploadMTUChars = uploadChars
+	conn.DownloadMTUBytes = downloadBytes
+
+	if idx < len(b.sources) && b.sources[idx] != nil {
+		b.sources[idx].UploadMTUBytes = uploadBytes
+		b.sources[idx].UploadMTUChars = uploadChars
+		b.sources[idx].DownloadMTUBytes = downloadBytes
+		conn = *b.sources[idx]
+	}
+
+	connections := append([]Connection(nil), snap.connections...)
+	connections[idx] = conn
+	b.snapshot.Store(&balancerSnapshot{
+		version:     b.version.Add(1),
+		connections: connections,
+		valid:       rebuildValidIndices(connections),
+		indexByKey:  snap.indexByKey,
+		stats:       snap.stats,
+	})
+	return true
+}
+
 func (b *Balancer) RefreshValidConnections() {
 	b.mu.Lock()
 	defer b.mu.Unlock()

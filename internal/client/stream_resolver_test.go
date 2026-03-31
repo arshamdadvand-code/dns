@@ -172,7 +172,7 @@ func TestSelectTargetConnectionsForPacketUsesSetupDuplicationCount(t *testing.T)
 	}
 }
 
-func TestSelectTargetConnectionsForPacketKeepsPingSingleTarget(t *testing.T) {
+func TestSelectTargetConnectionsForPacketAppliesDuplicationCountToPing(t *testing.T) {
 	c := buildTestClientWithResolvers(config.ClientConfig{
 		PacketDuplicationCount:      3,
 		SetupPacketDuplicationCount: 4,
@@ -182,8 +182,8 @@ func TestSelectTargetConnectionsForPacketKeepsPingSingleTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("packet %s: unexpected error: %v", Enums.PacketTypeName(Enums.PACKET_PING), err)
 	}
-	if len(selected) != 1 {
-		t.Fatalf("packet %s: expected single target, got=%d", Enums.PacketTypeName(Enums.PACKET_PING), len(selected))
+	if len(selected) != 3 {
+		t.Fatalf("packet %s: expected duplication count to apply, got=%d", Enums.PacketTypeName(Enums.PACKET_PING), len(selected))
 	}
 }
 

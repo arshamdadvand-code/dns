@@ -503,11 +503,6 @@ func (c *Client) runResolverRecheckBatch(ctx context.Context, now time.Time) {
 		if !ok || conn.IsValid {
 			continue
 		}
-		connPtr := c.connectionPtrByKey(candidate.key)
-		if connPtr == nil {
-			continue
-		}
-
 		c.resolverHealthMu.Lock()
 		if m, ok := c.resolverRecheck[candidate.key]; ok {
 			m.InFlight = true
@@ -515,14 +510,14 @@ func (c *Client) runResolverRecheckBatch(ctx context.Context, now time.Time) {
 		}
 		c.resolverHealthMu.Unlock()
 
-		go func(cand resolverRecheckCandidate, cn *Connection) {
+		go func(cand resolverRecheckCandidate, cn Connection) {
 			defer func() {
 				if r := recover(); r != nil {
 					c.scheduleResolverRecheckFailure(cand.key, cand.runtimePriority, c.now())
 				}
 			}()
 
-			if c.recheckResolverConnection(ctx, cn) {
+			if c.recheckResolverConnection(ctx, &cn) {
 				if !c.reactivateResolverConnection(cand.key) {
 					c.clearResolverRecheckInFlight(cand.key)
 				}
@@ -530,7 +525,7 @@ func (c *Client) runResolverRecheckBatch(ctx context.Context, now time.Time) {
 			}
 
 			c.scheduleResolverRecheckFailure(cand.key, cand.runtimePriority, c.now())
-		}(candidate, connPtr)
+		}(candidate, conn)
 	}
 }
 
@@ -619,10 +614,7 @@ func (c *Client) recheckResolverConnection(ctx context.Context, conn *Connection
 		if !c.recheckConnectionFn(conn) {
 			return false
 		}
-		conn.UploadMTUBytes = c.syncedUploadMTU
-		conn.UploadMTUChars = c.encodedCharsForPayload(c.syncedUploadMTU)
-		conn.DownloadMTUBytes = c.syncedDownloadMTU
-		return true
+		return c.applyRecheckedResolverMTU(conn.Key)
 	}
 
 	transport, err := newUDPQueryTransport(conn.ResolverLabel)
@@ -661,10 +653,31 @@ func (c *Client) recheckResolverConnection(ctx context.Context, conn *Connection
 		return false
 	}
 
-	conn.UploadMTUBytes = c.syncedUploadMTU
-	conn.UploadMTUChars = c.encodedCharsForPayload(c.syncedUploadMTU)
-	conn.DownloadMTUBytes = c.syncedDownloadMTU
-	return true
+	return c.applyRecheckedResolverMTU(conn.Key)
+}
+
+func (c *Client) applyRecheckedResolverMTU(serverKey string) bool {
+	if c == nil || serverKey == "" {
+		return false
+	}
+
+	if c.balancer == nil {
+		conn := c.connectionPtrByKey(serverKey)
+		if conn == nil {
+			return false
+		}
+		conn.UploadMTUBytes = c.syncedUploadMTU
+		conn.UploadMTUChars = c.encodedCharsForPayload(c.syncedUploadMTU)
+		conn.DownloadMTUBytes = c.syncedDownloadMTU
+		return true
+	}
+
+	return c.balancer.SetConnectionMTU(
+		serverKey,
+		c.syncedUploadMTU,
+		c.encodedCharsForPayload(c.syncedUploadMTU),
+		c.syncedDownloadMTU,
+	)
 }
 
 func (c *Client) isRuntimeDisabledResolver(serverKey string) bool {

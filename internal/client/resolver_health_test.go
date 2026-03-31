@@ -126,6 +126,77 @@ func TestResolverHealthRecheckReactivatesConnection(t *testing.T) {
 	}
 }
 
+func TestResolverHealthRecheckUsesSnapshotUpdateInsteadOfMutatingSharedConnectionPointer(t *testing.T) {
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		RecheckInactiveServersEnabled:  true,
+		RecheckInactiveIntervalSeconds: 60.0,
+		RecheckServerIntervalSeconds:   3.0,
+		RecheckBatchSize:               1,
+	}, "a", "b")
+	c.successMTUChecks = true
+	c.syncedUploadMTU = 120
+	c.syncedDownloadMTU = 180
+
+	if !c.balancer.SetConnectionValidity("a", false) {
+		t.Fatal("expected test connection a to become invalid")
+	}
+
+	if idx, ok := c.connectionsByKey["a"]; ok {
+		c.connections[idx].UploadMTUBytes = 0
+		c.connections[idx].UploadMTUChars = 0
+		c.connections[idx].DownloadMTUBytes = 0
+	}
+	c.balancer.RefreshValidConnections()
+
+	c.initResolverRecheckMeta()
+	now := time.Date(2026, 3, 31, 8, 0, 0, 0, time.UTC)
+	c.nowFn = func() time.Time { return now }
+
+	c.resolverHealthMu.Lock()
+	c.resolverRecheck["a"] = resolverRecheckState{
+		FailCount: 1,
+		NextAt:    now.Add(-time.Second),
+	}
+	c.runtimeDisabled["a"] = resolverDisabledState{
+		DisabledAt:  now.Add(-time.Minute),
+		NextRetryAt: now.Add(-time.Second),
+		RetryCount:  1,
+		Cause:       "timeout window",
+	}
+	c.resolverHealthMu.Unlock()
+
+	c.recheckConnectionFn = func(conn *Connection) bool {
+		if conn == nil {
+			return false
+		}
+		conn.UploadMTUBytes = 33
+		conn.UploadMTUChars = 44
+		conn.DownloadMTUBytes = 55
+		if idx, ok := c.connectionsByKey["a"]; ok {
+			source := c.connections[idx]
+			if source.UploadMTUBytes != 0 || source.UploadMTUChars != 0 || source.DownloadMTUBytes != 0 {
+				t.Fatalf("expected shared connection source to remain untouched during probe, got up=%d chars=%d down=%d", source.UploadMTUBytes, source.UploadMTUChars, source.DownloadMTUBytes)
+			}
+		}
+		return conn.Key == "a"
+	}
+
+	c.runResolverRecheckBatch(context.Background(), now)
+
+	waitForResolverHealthCondition(t, 500*time.Millisecond, func() bool {
+		conn, ok := c.GetConnectionByKey("a")
+		return ok && conn.IsValid
+	}, "expected recheck to reactivate resolver")
+
+	conn, ok := c.GetConnectionByKey("a")
+	if !ok {
+		t.Fatal("expected resolver a to exist after reactivation")
+	}
+	if conn.UploadMTUBytes != 120 || conn.UploadMTUChars != c.encodedCharsForPayload(120) || conn.DownloadMTUBytes != 180 {
+		t.Fatalf("expected synced MTUs after recheck, got up=%d chars=%d down=%d", conn.UploadMTUBytes, conn.UploadMTUChars, conn.DownloadMTUBytes)
+	}
+}
+
 func TestResolverHealthRecheckFailureSchedulesNextRetry(t *testing.T) {
 	c := buildTestClientWithResolvers(config.ClientConfig{
 		RecheckInactiveServersEnabled:  true,

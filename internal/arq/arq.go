@@ -1008,7 +1008,7 @@ func (a *ARQ) ioLoop() {
 					a.mu.Lock()
 					if info, exists := a.sndBuf[chunk.sn]; exists {
 						info.Dispatched = true
-						info.LastSentAt = time.Now()
+						info.LastSentAt = time.Now().Add(-info.CurrentRTO)
 					}
 					a.mu.Unlock()
 				}
@@ -1732,7 +1732,7 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 	lastSentAt := time.Time{}
 	if !ok {
 		dispatchedFlag = true
-		lastSentAt = now
+		lastSentAt = now.Add(-initialRTO)
 	}
 
 	a.controlSndBuf[key] = &arqControlItem{

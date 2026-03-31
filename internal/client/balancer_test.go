@@ -109,3 +109,27 @@ func TestBalancerSetConnectionValidityRefreshesSnapshotFromSource(t *testing.T) 
 		t.Fatalf("expected snapshot to pick latest source MTUs, got up=%d down=%d", got.UploadMTUBytes, got.DownloadMTUBytes)
 	}
 }
+
+func TestBalancerSetConnectionMTURefreshesSourceAndSnapshot(t *testing.T) {
+	b := NewBalancer(BalancingRoundRobinDefault)
+	connections := []*Connection{
+		{Key: "a", IsValid: true, UploadMTUBytes: 120, UploadMTUChars: 180, DownloadMTUBytes: 220},
+	}
+	b.SetConnections(connections)
+
+	if !b.SetConnectionMTU("a", 90, 135, 180) {
+		t.Fatal("expected SetConnectionMTU to succeed")
+	}
+
+	if connections[0].UploadMTUBytes != 90 || connections[0].UploadMTUChars != 135 || connections[0].DownloadMTUBytes != 180 {
+		t.Fatalf("expected source MTUs to update, got up=%d chars=%d down=%d", connections[0].UploadMTUBytes, connections[0].UploadMTUChars, connections[0].DownloadMTUBytes)
+	}
+
+	got, ok := b.GetConnectionByKey("a")
+	if !ok {
+		t.Fatal("expected resolver a in snapshot")
+	}
+	if got.UploadMTUBytes != 90 || got.UploadMTUChars != 135 || got.DownloadMTUBytes != 180 {
+		t.Fatalf("expected snapshot MTUs to update, got up=%d chars=%d down=%d", got.UploadMTUBytes, got.UploadMTUChars, got.DownloadMTUBytes)
+	}
+}

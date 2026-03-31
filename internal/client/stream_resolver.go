@@ -7,25 +7,8 @@ import (
 	Enums "masterdnsvpn-go/internal/enums"
 )
 
-func isSingleTargetRuntimePacket(packetType uint8) bool {
-	switch packetType {
-	case Enums.PACKET_PING:
-		return true
-	}
-
-	if _, ok := Enums.ReverseControlAckFor(packetType); ok {
-		return true
-	}
-
-	return false
-}
-
 func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 	if c == nil {
-		return 1
-	}
-
-	if isSingleTargetRuntimePacket(packetType) {
 		return 1
 	}
 
