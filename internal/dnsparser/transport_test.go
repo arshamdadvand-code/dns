@@ -301,3 +301,32 @@ func TestBuildTunnelTXTQuestionPacketMatchesLegacyQuestionBuilder(t *testing.T) 
 		t.Fatal("direct tunnel question packet differs from legacy builder output")
 	}
 }
+
+func TestBuildTunnelTXTQuestionPacketPreparedMatchesDirectBuilder(t *testing.T) {
+	encoded := []byte(stringsOf('b', 130))
+
+	normalized, qname, err := PrepareTunnelDomainQname("V.Example.com.")
+	if err != nil {
+		t.Fatalf("PrepareTunnelDomainQname returned error: %v", err)
+	}
+	if normalized != "v.example.com" {
+		t.Fatalf("unexpected normalized domain: %q", normalized)
+	}
+
+	direct, err := BuildTunnelTXTQuestionPacket("v.example.com", encoded, Enums.DNS_RECORD_TYPE_TXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTunnelTXTQuestionPacket returned error: %v", err)
+	}
+
+	prepared, err := BuildTunnelTXTQuestionPacketPrepared(normalized, qname, encoded, Enums.DNS_RECORD_TYPE_TXT, 4096)
+	if err != nil {
+		t.Fatalf("BuildTunnelTXTQuestionPacketPrepared returned error: %v", err)
+	}
+
+	if len(direct) != len(prepared) {
+		t.Fatalf("packet length mismatch: direct=%d prepared=%d", len(direct), len(prepared))
+	}
+	if !bytes.Equal(direct[2:], prepared[2:]) {
+		t.Fatal("prepared tunnel question packet differs from direct builder output")
+	}
+}

@@ -75,21 +75,23 @@ func BuildTXTQuestionPacket(name string, qType uint16, ednsUDPSize uint16) ([]by
 }
 
 func BuildTunnelTXTQuestionPacket(domain string, encodedFrame []byte, qType uint16, ednsUDPSize uint16) ([]byte, error) {
-	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
-	if domain == "" {
-		return nil, ErrInvalidName
-	}
-
-	if len(encodedFrame) == 0 {
-		return BuildTXTQuestionPacket(domain, qType, ednsUDPSize)
-	}
-	if encodedQNameLen(len(encodedFrame), len(domain)) > maxDNSNameLen {
-		return nil, ErrInvalidName
-	}
-
-	domainQname, err := encodeDNSNameStrict(domain)
+	normalizedDomain, domainQname, err := PrepareTunnelDomainQname(domain)
 	if err != nil {
 		return nil, err
+	}
+
+	return BuildTunnelTXTQuestionPacketPrepared(normalizedDomain, domainQname, encodedFrame, qType, ednsUDPSize)
+}
+
+func BuildTunnelTXTQuestionPacketPrepared(normalizedDomain string, domainQname []byte, encodedFrame []byte, qType uint16, ednsUDPSize uint16) ([]byte, error) {
+	if normalizedDomain == "" || len(domainQname) == 0 {
+		return nil, ErrInvalidName
+	}
+	if len(encodedFrame) == 0 {
+		return buildTXTQuestionPacketPrepared(domainQname, qType, ednsUDPSize), nil
+	}
+	if encodedQNameLen(len(encodedFrame), len(normalizedDomain)) > maxDNSNameLen {
+		return nil, ErrInvalidName
 	}
 
 	labelCount := (len(encodedFrame) + maxDNSLabelLen - 1) / maxDNSLabelLen
@@ -135,6 +137,55 @@ func BuildTunnelTXTQuestionPacket(domain string, encodedFrame []byte, qType uint
 	}
 
 	return packet, nil
+}
+
+func PrepareTunnelDomainQname(domain string) (string, []byte, error) {
+	normalizedDomain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if normalizedDomain == "" {
+		return "", nil, ErrInvalidName
+	}
+
+	domainQname, err := encodeDNSNameStrict(normalizedDomain)
+	if err != nil {
+		return "", nil, err
+	}
+	return normalizedDomain, domainQname, nil
+}
+
+func buildTXTQuestionPacketPrepared(qname []byte, qType uint16, ednsUDPSize uint16) []byte {
+	requestID := nextDNSRequestID()
+
+	arCount := uint16(0)
+	optLen := 0
+	if ednsUDPSize > 0 {
+		arCount = 1
+		optLen = 11
+	}
+
+	packet := make([]byte, dnsHeaderSize+len(qname)+4+optLen)
+	binary.BigEndian.PutUint16(packet[0:2], requestID)
+	binary.BigEndian.PutUint16(packet[2:4], 0x0100)
+	binary.BigEndian.PutUint16(packet[4:6], 1)
+	binary.BigEndian.PutUint16(packet[10:12], arCount)
+
+	offset := dnsHeaderSize
+	offset += copy(packet[offset:], qname)
+	binary.BigEndian.PutUint16(packet[offset:offset+2], qType)
+	binary.BigEndian.PutUint16(packet[offset+2:offset+4], Enums.DNSQ_CLASS_IN)
+	offset += 4
+
+	if ednsUDPSize > 0 {
+		packet[offset] = 0x00
+		offset++
+		binary.BigEndian.PutUint16(packet[offset:offset+2], Enums.DNS_RECORD_TYPE_OPT)
+		offset += 2
+		binary.BigEndian.PutUint16(packet[offset:offset+2], ednsUDPSize)
+		offset += 2
+		offset += 4
+		binary.BigEndian.PutUint16(packet[offset:offset+2], 0)
+	}
+
+	return packet
 }
 
 func BuildTXTResponsePacket(questionPacket []byte, answerName string, answerPayloads [][]byte) ([]byte, error) {

@@ -452,6 +452,7 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 	}
 
 	var packetByDomain map[string][]byte
+	var preparedDomainByName map[string]preparedTunnelDomain
 	refreshWindow := c.tunnelPacketTimeout / 2
 	if refreshWindow < 250*time.Millisecond {
 		refreshWindow = 250 * time.Millisecond
@@ -489,6 +490,9 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 			if packetByDomain != nil {
 				clear(packetByDomain)
 			}
+			if preparedDomainByName != nil {
+				clear(preparedDomainByName)
+			}
 
 			for _, resolverConn := range conns {
 				domain := resolverConn.Domain
@@ -501,10 +505,22 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 					continue
 				}
 
+				prepared, cachedPrepared := preparedDomainByName[domain]
+				if !cachedPrepared {
+					prepared, err = prepareTunnelDomain(domain)
+					if err != nil {
+						continue
+					}
+					if preparedDomainByName == nil {
+						preparedDomainByName = make(map[string]preparedTunnelDomain, len(conns))
+					}
+					preparedDomainByName[domain] = prepared
+				}
+
 				var dnsPacket []byte
 				switch {
 				case firstDNSPacket == nil:
-					dnsPacket, err = buildTunnelTXTQuestionBytes(domain, encoded)
+					dnsPacket, err = buildTunnelTXTQuestionBytesPrepared(prepared, encoded)
 					if err != nil {
 						continue
 					}
@@ -519,7 +535,7 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 					var cached bool
 					dnsPacket, cached = packetByDomain[domain]
 					if !cached {
-						dnsPacket, err = buildTunnelTXTQuestionBytes(domain, encoded)
+						dnsPacket, err = buildTunnelTXTQuestionBytesPrepared(prepared, encoded)
 						if err != nil {
 							continue
 						}

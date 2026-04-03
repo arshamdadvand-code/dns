@@ -30,7 +30,7 @@ This system is designed around compatibility with many resolver behaviors and ha
 | MTU tolerance | Better than DNSTT | - | Works even with very small MTU because protocol overhead is very low |
 | Failover system | ❌ | ❌ | ✅ |
 | Download speed 10MB (Local) | 🟡 0.978s | 🔴 2.492s | 🟢 0.270s |
-| Upload speed 10MB (Local) | 🟡 3.249s | 🔴 16.207s | 🟢 1.819s |
+| Upload speed 10MB (Local) | 🟡 3.249s | 🔴 16.207s | 🟢 1.746s |
 | Resolver health checks and auto-disable | ❌ | ❌ | ✅ |
 | Background reactivation of healthy resolvers | ❌ | ❌ | ✅ |
 | Local DNS service on client (to reduce DNS hijacking) | ❌ | ❌ | ✅ (with strong DNS caching) |

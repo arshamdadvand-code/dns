@@ -15,8 +15,25 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
+type preparedTunnelDomain struct {
+	normalized string
+	qname      []byte
+}
+
 func buildTunnelTXTQuestionBytes(domain string, encoded []byte) ([]byte, error) {
 	return DnsParser.BuildTunnelTXTQuestionPacket(domain, encoded, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
+}
+
+func prepareTunnelDomain(domain string) (preparedTunnelDomain, error) {
+	normalized, qname, err := DnsParser.PrepareTunnelDomainQname(domain)
+	if err != nil {
+		return preparedTunnelDomain{}, err
+	}
+	return preparedTunnelDomain{normalized: normalized, qname: qname}, nil
+}
+
+func buildTunnelTXTQuestionBytesPrepared(domain preparedTunnelDomain, encoded []byte) ([]byte, error) {
+	return DnsParser.BuildTunnelTXTQuestionPacketPrepared(domain.normalized, domain.qname, encoded, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
 }
 
 // buildTunnelTXTQueryRaw builds an encoded tunnel query using the provided options and codec.
