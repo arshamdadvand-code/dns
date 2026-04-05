@@ -262,8 +262,8 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 
 	c.tunnelConn = conn
 
-	c.log.Infof("\U0001F4E1 <cyan>Async Runtime Initialized: <green>%d Writes</green>, <green>%d Reads</green>, <green>%d Processors</green></cyan>",
-		c.tunnelWriterWorkers, c.tunnelReaderWorkers, c.tunnelProcessWorkers)
+	c.log.Infof("\U0001F4E1 <cyan>Async Runtime Initialized: <green>%d RX/TX Workers</green>, <green>%d Processors</green></cyan>",
+		c.tunnelRX_TX_Workers, c.tunnelProcessWorkers)
 
 	// Start TCP/SOCKS Proxy Listener
 	c.tcpListener = NewTCPListener(c, c.cfg.ProtocolType)
@@ -282,7 +282,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	}
 
 	// 6. Spawn Reader Workers (High-speed ingestion)
-	for i := 0; i < c.tunnelReaderWorkers; i++ {
+	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
 		c.asyncWG.Add(1)
 		go c.asyncReaderWorker(runtimeCtx, i, conn)
 	}
@@ -294,7 +294,7 @@ func (c *Client) StartAsyncRuntime(parentCtx context.Context) error {
 	}
 
 	// 6. Spawn Writer Workers (Burst transmission)
-	for i := 0; i < c.tunnelWriterWorkers; i++ {
+	for i := 0; i < c.tunnelRX_TX_Workers; i++ {
 		c.asyncWG.Add(1)
 		go c.asyncWriterWorker(runtimeCtx, i, conn)
 	}

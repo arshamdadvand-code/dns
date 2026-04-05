@@ -104,8 +104,7 @@ type Client struct {
 	tunnelConn           *net.UDPConn
 	txChannel            chan rawOutboundTask
 	rxChannel            chan asyncReadPacket
-	tunnelReaderWorkers  int
-	tunnelWriterWorkers  int
+	tunnelRX_TX_Workers  int
 	tunnelProcessWorkers int
 	tunnelPacketTimeout  time.Duration
 
@@ -255,8 +254,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		streamResolverFailoverCooldown:        time.Duration(cfg.StreamResolverFailoverCooldownSec * float64(time.Second)),
 
 		// Workers config
-		tunnelReaderWorkers:   cfg.TunnelReaderWorkers,
-		tunnelWriterWorkers:   cfg.TunnelWriterWorkers,
+		tunnelRX_TX_Workers:   cfg.RX_TX_Workers,
 		tunnelProcessWorkers:  cfg.TunnelProcessWorkers,
 		tunnelPacketTimeout:   time.Duration(cfg.TunnelPacketTimeoutSec * float64(time.Second)),
 		txChannel:             make(chan rawOutboundTask, cfg.TXChannelSize),

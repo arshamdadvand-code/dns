@@ -493,8 +493,7 @@ sudo journalctl -u masterdnsvpn-client -f
 
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
-| `TUNNEL_READER_WORKERS` | `2` | clamp به `1..64` | تعداد workerهایی که پاسخ‌های DNS دریافتی را از runtime می‌خوانند.<br>عدد بیشتر می‌تواند روی سیستم‌های چند‌هسته‌ای throughput را بهتر کند، ولی زیاد کردن بی‌دلیل آن همیشه مفید نیست. |
-| `TUNNEL_WRITER_WORKERS` | `2` | clamp به `1..64` | تعداد workerهای نوشتن queryهای خروجی به شبکه. |
+| `RX_TX_WORKERS` | `2` | clamp به `1..64` | تعداد workerهای مشترک runtime برای هر دو مسیر خواندن پاسخ‌های DNS و نوشتن queryهای خروجی.<br>این مقدار به صورت یکسان برای RX و TX استفاده می‌شود تا تنظیمات ساده‌تر بماند. |
 | `TUNNEL_PROCESS_WORKERS` | `2` | clamp به `1..64` | تعداد workerهایی که packetهای دریافتی را decode و process می‌کنند.<br>اگر resolverهای زیادی دارید، این بخش روی CPU اثر زیادی دارد. |
 | `TUNNEL_PACKET_TIMEOUT_SECONDS` | `10.0` | clamp به `0.5..120` ثانیه | timeout کلی یک packet در runtime async کلاینت است.<br>اگر packet تا این مدت outcome نگیرد، runtime آن را timeout حساب می‌کند. |
 | `DISPATCHER_IDLE_POLL_INTERVAL_SECONDS` | `0.020` | clamp به `0.001..1.0` ثانیه | وقتی dispatcher کار خاصی ندارد، هر چند وقت یک‌بار دوباره queueها را چک کند.<br>عدد کوچک‌تر latency را کم می‌کند ولی CPU idle را بالا می‌برد. |

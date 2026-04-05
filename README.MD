@@ -505,8 +505,7 @@ These settings are critical on the server:
 
 | Parameter | Sample Value | Allowed Values / Real Behavior | Full Explanation |
 | :--- | :--- | :--- | :--- |
-| `TUNNEL_READER_WORKERS` | `6` | if invalid, fallback applies | Number of workers reading raw UDP tunnel traffic. |
-| `TUNNEL_WRITER_WORKERS` | `6` | if invalid, fallback applies | Number of workers writing UDP tunnel traffic. |
+| `RX_TX_WORKERS` | `6` | if invalid, fallback applies | Number of shared runtime workers used for both UDP tunnel reads and writes. |
 | `TUNNEL_PROCESS_WORKERS` | `4` | if invalid, fallback applies | Number of workers processing tunnel packets after read. |
 | `TUNNEL_PACKET_TIMEOUT_SECONDS` | `8.0` | if invalid, fallback applies | Overall timeout for tunnel packet handling. |
 | `DISPATCHER_IDLE_POLL_INTERVAL_SECONDS` | `0.020` | if invalid, fallback applies | When there is nothing to send, the dispatcher sleeps for this interval before polling again. |
