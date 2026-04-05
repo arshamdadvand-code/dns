@@ -53,8 +53,6 @@ func (c *Client) StopAsyncRuntime() {
 		c.dnsListener.Stop()
 	}
 
-	c.closeTunnelSockets()
-
 	if c.pingManager != nil {
 		c.pingManager.Stop()
 	}
