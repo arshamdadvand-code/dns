@@ -453,6 +453,9 @@ func (b *Balancer) TrackResolverSuccess(
 	if sample.timedOut && !sample.timedOutAt.IsZero() {
 		b.RetractTimeoutWindow(sample.serverKey, receivedAt, window)
 	}
+	if !sample.sentAt.IsZero() && !receivedAt.Before(sample.sentAt) {
+		rtt = receivedAt.Sub(sample.sentAt)
+	}
 	b.ReportSuccessWindow(sample.serverKey, receivedAt, window, rtt)
 }
 
