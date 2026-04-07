@@ -457,25 +457,32 @@ func (c ServerConfig) StreamFailurePacketTTL() time.Duration {
 
 func (c ServerConfig) EffectiveUDPReaders() int {
 	recommended := min(max(runtime.NumCPU()/2, 1), 8)
-	if c.ProtocolType == "SOCKS5" && recommended < 2 {
+	if c.ProtocolType == "SOCKS5" && runtime.NumCPU() >= 4 && recommended < 2 {
 		recommended = 2
 	}
 
-	if c.MaxConcurrentRequests >= 32768 && recommended < 4 {
+	if c.MaxConcurrentRequests >= 32768 && runtime.NumCPU() >= 4 && recommended < 4 {
 		recommended = 4
 	}
+
 	return clampInt(max(c.UDPReaders, recommended), 1, 32)
 }
 
 func (c ServerConfig) EffectiveDNSRequestWorkers() int {
 	recommended := min(max(runtime.NumCPU(), 2), 24)
-	if c.ProtocolType == "SOCKS5" && recommended < 4 {
+	if c.ProtocolType == "SOCKS5" && runtime.NumCPU() >= 4 && recommended < 4 {
 		recommended = 4
 	}
 
-	if recommended < c.EffectiveUDPReaders()*2 {
-		recommended = c.EffectiveUDPReaders() * 2
+	readerTarget := c.EffectiveUDPReaders() + 1
+	if runtime.NumCPU() >= 4 {
+		readerTarget = c.EffectiveUDPReaders() * 2
 	}
+
+	if recommended < readerTarget {
+		recommended = readerTarget
+	}
+
 	return clampInt(max(c.DNSRequestWorkers, recommended), 1, 64)
 }
 

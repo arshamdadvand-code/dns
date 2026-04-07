@@ -137,10 +137,6 @@ STREAM_RESOLVER_FAILOVER_COOLDOWN = 2.5
 # background using the current synced upload/download MTUs.
 RECHECK_INACTIVE_SERVERS_ENABLED = true
 
-# Full background recheck cycle interval.
-# Clamped to [60s, 86400s].
-RECHECK_INACTIVE_INTERVAL_SECONDS = 60.0
-
 # If true, a resolver is runtime-disabled when it stays timeout-only across the
 # configured window and enough observations have been collected.
 AUTO_DISABLE_TIMEOUT_SERVERS = true
@@ -188,11 +184,12 @@ MIN_DOWNLOAD_MTU = 500
 MAX_UPLOAD_MTU = 150
 MAX_DOWNLOAD_MTU = 900
 
-# MTU probe retries, timeout, and parallelism.
-# Retries and parallelism must be >= 1.
+# MTU probe retries and timeout.
+# Parallelism is auto-raised internally when resolver count is large, but you
+# can still override it in advanced setups if needed.
 MTU_TEST_RETRIES = 2
 MTU_TEST_TIMEOUT = 2.0
-MTU_TEST_PARALLELISM = 32
+MTU_TEST_PARALLELISM = 16
 
 # Export successful MTU-tested resolvers to a file.
 SAVE_MTU_SERVERS_TO_FILE = false
@@ -215,9 +212,10 @@ MTU_ADDED_SERVER_LOG_FORMAT = "Resolver {IP} added back at {TIME} (UP {UP_MTU}, 
 # ------------------------------------------------------------------------------
 
 # Async tunnel runtime worker counts.
-# Each must be >= 1.
-RX_TX_WORKERS = 8
-TUNNEL_PROCESS_WORKERS = 10
+# These can be overridden, but leaving them unset usually lets the client's
+# smart sizing choose a better baseline for the current machine.
+RX_TX_WORKERS = 4
+TUNNEL_PROCESS_WORKERS = 6
 
 # Per-packet tunnel timeout used in async runtime paths.
 # Clamped to [0.5s, 120s].
@@ -228,9 +226,8 @@ TUNNEL_PACKET_TIMEOUT_SECONDS = 10.0
 # Clamped to [0.001s, 1s].
 DISPATCHER_IDLE_POLL_INTERVAL_SECONDS = 0.020
 
-# Channel sizes for async RX pipelines.
-# Clamped in code to [64, 65536].
-RX_CHANNEL_SIZE = 16384
+# Channel sizes for async RX pipelines are auto-raised internally when needed.
+RX_CHANNEL_SIZE = 4096
 
 # UDP connection pool size per resolver key.
 # Local UDP ASSOCIATE read timeout.
@@ -281,8 +278,9 @@ PING_COLD_THRESHOLD_SECONDS = 30.0
 # ------------------------------------------------------------------------------
 
 # Maximum control blocks packed together in one outgoing batch.
-# Clamped to [1, 64].
-MAX_PACKETS_PER_BATCH = 5
+# The default is already tuned conservatively; only override this if you are
+# intentionally testing a different batching profile.
+MAX_PACKETS_PER_BATCH = 8
 
 # ARQ data/control behavior.
 # These values are clamped in code and should stay internally consistent.

@@ -111,10 +111,10 @@ func TestServerConfigEffectiveSizingUsesSmartFloorsAndDerivedCapacities(t *testi
 	cfg.DNSCacheMaxRecords = 100
 	cfg.ARQWindowSize = 2000
 
-	if got := cfg.EffectiveUDPReaders(); got < 2 {
+	if got := cfg.EffectiveUDPReaders(); got < 1 {
 		t.Fatalf("expected effective udp readers floor, got=%d", got)
 	}
-	if got := cfg.EffectiveDNSRequestWorkers(); got < cfg.EffectiveUDPReaders()*2 {
+	if got := cfg.EffectiveDNSRequestWorkers(); got < cfg.EffectiveUDPReaders()+1 {
 		t.Fatalf("expected dns workers to track reader pressure, got=%d readers=%d", got, cfg.EffectiveUDPReaders())
 	}
 	if got := cfg.EffectiveDeferredSessionQueueLimit(); got < 256 {

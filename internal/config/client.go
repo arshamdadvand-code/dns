@@ -49,7 +49,6 @@ type ClientConfig struct {
 	StreamResolverFailoverResendThreshold int               `toml:"STREAM_RESOLVER_FAILOVER_RESEND_THRESHOLD"`
 	StreamResolverFailoverCooldownSec     float64           `toml:"STREAM_RESOLVER_FAILOVER_COOLDOWN"`
 	RecheckInactiveServersEnabled         bool              `toml:"RECHECK_INACTIVE_SERVERS_ENABLED"`
-	RecheckInactiveIntervalSeconds        float64           `toml:"RECHECK_INACTIVE_INTERVAL_SECONDS"`
 	AutoDisableTimeoutServers             bool              `toml:"AUTO_DISABLE_TIMEOUT_SERVERS"`
 	AutoDisableTimeoutWindowSeconds       float64           `toml:"AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS"`
 	BaseEncodeData                        bool              `toml:"BASE_ENCODE_DATA"`
@@ -150,7 +149,6 @@ func defaultClientConfig() ClientConfig {
 		StreamResolverFailoverResendThreshold: 2,
 		StreamResolverFailoverCooldownSec:     1.0,
 		RecheckInactiveServersEnabled:         true,
-		RecheckInactiveIntervalSeconds:        1800.0,
 		AutoDisableTimeoutServers:             true,
 		AutoDisableTimeoutWindowSeconds:       180.0,
 		BaseEncodeData:                        false,
@@ -329,7 +327,6 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.SetupPacketDuplicationCount = clampInt(defaultIntBelow(cfg.SetupPacketDuplicationCount, 1, max(2, cfg.PacketDuplicationCount)), cfg.PacketDuplicationCount, 5)
 	cfg.StreamResolverFailoverResendThreshold = clampInt(defaultIntBelow(cfg.StreamResolverFailoverResendThreshold, 1, 2), 1, 128)
 	cfg.StreamResolverFailoverCooldownSec = clampFloat(defaultFloatAtMostZero(cfg.StreamResolverFailoverCooldownSec, 1.0), 0.1, 120.0)
-	cfg.RecheckInactiveIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.RecheckInactiveIntervalSeconds, 1800.0), 60.0, 86400.0)
 	cfg.AutoDisableTimeoutWindowSeconds = clampFloat(defaultFloatAtMostZero(cfg.AutoDisableTimeoutWindowSeconds, 180.0), 1.0, 86400.0)
 	cfg.MaxPacketsPerBatch = clampInt(defaultIntBelow(cfg.MaxPacketsPerBatch, 1, 10), 1, 64)
 	cfg.ARQWindowSize = clampInt(defaultIntBelow(cfg.ARQWindowSize, 1, 600), 1, 6000)
