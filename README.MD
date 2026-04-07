@@ -471,7 +471,6 @@ These settings are critical on the server:
 | `RECHECK_BATCH_SIZE` | `5` | If `<1`, fallback to `1` | Maximum number of resolver rechecks launched in one pass.<br>Higher values reactivate resolvers faster but use more background work. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | Enables automatic disabling of resolvers that keep timing out and show no successful activity. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `180.0` | If `<=0`, fallback applies | Time window used to decide whether a resolver is “timeout only”.<br>If all observations in this window are timeouts, it may be disabled. |
-| `AUTO_DISABLE_CHECK_INTERVAL_SECONDS` | `3.0` | If `<=0`, fallback applies | How often the health loop evaluates timeout-only resolvers for auto-disable. |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | If enabled, payloads are encoded in a base-safe format before tunneling.<br>This usually reduces payload efficiency, but can help in strict resolver environments. |
 
 ### 3.4.5) 🗜️ Compression

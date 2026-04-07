@@ -280,7 +280,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	c.balancer.SetAutoDisableConfig(
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
-		time.Duration(cfg.AutoDisableCheckIntervalSeconds*float64(time.Second)),
 	)
 	c.pingManager = newPingManager(c)
 	return c

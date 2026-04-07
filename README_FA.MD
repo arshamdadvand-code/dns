@@ -459,7 +459,6 @@ sudo journalctl -u masterdnsvpn-client -f
 | `RECHECK_BATCH_SIZE` | `5` | clamp به `1..1024` | در هر دور، چند resolver غیرفعال هم‌زمان/در یک batch بررسی شوند.<br>عدد خیلی بالا startup یا health loop را تهاجمی‌تر می‌کند. |
 | `AUTO_DISABLE_TIMEOUT_SERVERS` | `true` | `true/false` | اگر یک resolver در runtime فقط timeout تولید کند و هیچ success نداشته باشد، کلاینت می‌تواند موقتاً آن را از لیست فعال خارج کند.<br>این قابلیت برای جلوگیری از هدر رفتن packet روی resolver مرده است. |
 | `AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS` | `90.0` | clamp به `1..86400` ثانیه | پنجره‌ای که در آن history timeout-only بررسی می‌شود.<br>اگر در این بازه فقط timeout ببینیم و شرط observation هم برقرار باشد، resolver غیرفعال می‌شود. |
-| `AUTO_DISABLE_CHECK_INTERVAL_SECONDS` | `4.0` | clamp به `0.25..600` ثانیه | هر چند وقت یک‌بار health loop وضعیت timeout-only resolverها را بررسی کند. |
 | `BASE_ENCODE_DATA` | `false` | `true/false` | اگر `true` باشد، payload قبل از قرار گرفتن داخل labelهای DNS به شکل base-safe encode می‌شود.<br>معمولاً لازم نیست، ولی بعضی resolverها با این حالت سازگارترند.<br>عوض کردن این گزینه روی اندازه payload اثر می‌گذارد و می‌تواند throughput را تغییر دهد. |
 
 ### ۳.۴.۵) بخش 🗜️ فشرده‌سازی

@@ -99,7 +99,6 @@ type Balancer struct {
 
 	autoDisableEnabled       bool
 	autoDisableTimeoutWindow time.Duration
-	autoDisableCheckInterval time.Duration
 }
 
 type connectionStats struct {
@@ -149,14 +148,13 @@ func (b *Balancer) SetStreamFailoverConfig(threshold int, cooldown time.Duration
 	b.mu.Unlock()
 }
 
-func (b *Balancer) SetAutoDisableConfig(enabled bool, window time.Duration, interval time.Duration) {
+func (b *Balancer) SetAutoDisableConfig(enabled bool, window time.Duration) {
 	if b == nil {
 		return
 	}
 	b.mu.Lock()
 	b.autoDisableEnabled = enabled
 	b.autoDisableTimeoutWindow = window
-	b.autoDisableCheckInterval = interval
 	b.mu.Unlock()
 }
 
@@ -389,18 +387,84 @@ func autoDisableMinObservationsForActiveCount(active int) int {
 	case active <= 3:
 		return 1000000
 	case active <= 5:
+		return 48
+	case active <= 8:
 		return 40
 	case active <= 10:
-		return 30
+		return 34
+	case active <= 15:
+		return 26
 	case active <= 20:
-		return 20
+		return 22
+	case active <= 30:
+		return 18
+	case active <= 40:
+		return 15
 	case active <= 50:
-		return 12
+		return 13
+	case active <= 75:
+		return 10
 	case active <= 100:
 		return 8
+	case active <= 150:
+		return 7
 	default:
 		return 6
 	}
+}
+
+func autoDisableCheckIntervalForActiveCount(active int, window time.Duration) time.Duration {
+	interval := window / 30
+	if interval <= 0 {
+		interval = 3 * time.Second
+	}
+	if interval < time.Second {
+		interval = time.Second
+	}
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+
+	switch {
+	case active <= 3:
+		if interval < 5*time.Second {
+			interval = 5 * time.Second
+		}
+	case active <= 5:
+		if interval < 5*time.Second {
+			interval = 5 * time.Second
+		}
+	case active <= 8:
+		if interval < 4500*time.Millisecond {
+			interval = 4500 * time.Millisecond
+		}
+	case active <= 10:
+		if interval < 4*time.Second {
+			interval = 4 * time.Second
+		}
+	case active <= 15:
+		if interval < 3500*time.Millisecond {
+			interval = 3500 * time.Millisecond
+		}
+	case active <= 20:
+		if interval < 3*time.Second {
+			interval = 3 * time.Second
+		}
+	case active <= 30:
+		if interval < 2500*time.Millisecond {
+			interval = 2500 * time.Millisecond
+		}
+	case active <= 50:
+		if interval < 2*time.Second {
+			interval = 2 * time.Second
+		}
+	case active <= 75:
+		if interval < 1500*time.Millisecond {
+			interval = 1500 * time.Millisecond
+		}
+	}
+
+	return interval
 }
 
 func (b *Balancer) RetractTimeout(serverKey string, now time.Time, window time.Duration) bool {
@@ -431,9 +495,10 @@ func (b *Balancer) TrackResolverSend(
 	}
 
 	b.mu.RLock()
-	checkInterval := b.autoDisableCheckInterval
 	window := b.autoDisableTimeoutWindow
+	activeCount := len(b.activeIDs)
 	b.mu.RUnlock()
+	checkInterval := autoDisableCheckIntervalForActiveCount(activeCount, window)
 
 	key := balancerResolverSampleKey{
 		resolverAddr: resolverAddr,
@@ -563,9 +628,10 @@ func (b *Balancer) CollectExpiredResolverTimeouts(
 
 	b.mu.RLock()
 	autoDisable := b.autoDisableEnabled
-	checkInterval := b.autoDisableCheckInterval
 	window := b.autoDisableTimeoutWindow
+	activeCount := len(b.activeIDs)
 	b.mu.RUnlock()
+	checkInterval := autoDisableCheckIntervalForActiveCount(activeCount, window)
 
 	if !autoDisable {
 		return

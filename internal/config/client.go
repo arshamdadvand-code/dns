@@ -54,7 +54,6 @@ type ClientConfig struct {
 	RecheckBatchSize                      int               `toml:"RECHECK_BATCH_SIZE"`
 	AutoDisableTimeoutServers             bool              `toml:"AUTO_DISABLE_TIMEOUT_SERVERS"`
 	AutoDisableTimeoutWindowSeconds       float64           `toml:"AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS"`
-	AutoDisableCheckIntervalSeconds       float64           `toml:"AUTO_DISABLE_CHECK_INTERVAL_SECONDS"`
 	BaseEncodeData                        bool              `toml:"BASE_ENCODE_DATA"`
 	UploadCompressionType                 int               `toml:"UPLOAD_COMPRESSION_TYPE"`
 	DownloadCompressionType               int               `toml:"DOWNLOAD_COMPRESSION_TYPE"`
@@ -162,7 +161,6 @@ func defaultClientConfig() ClientConfig {
 		RecheckBatchSize:                      5,
 		AutoDisableTimeoutServers:             true,
 		AutoDisableTimeoutWindowSeconds:       180.0,
-		AutoDisableCheckIntervalSeconds:       3.0,
 		BaseEncodeData:                        false,
 		UploadCompressionType:                 compression.TypeOff,
 		DownloadCompressionType:               compression.TypeOff,
@@ -347,7 +345,6 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.RecheckServerIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.RecheckServerIntervalSeconds, 3.0), 1.0, 600.0)
 	cfg.RecheckBatchSize = clampInt(defaultIntBelow(cfg.RecheckBatchSize, 1, 5), 1, 1024)
 	cfg.AutoDisableTimeoutWindowSeconds = clampFloat(defaultFloatAtMostZero(cfg.AutoDisableTimeoutWindowSeconds, 180.0), 1.0, 86400.0)
-	cfg.AutoDisableCheckIntervalSeconds = clampFloat(defaultFloatAtMostZero(cfg.AutoDisableCheckIntervalSeconds, 3.0), 0.25, 600.0)
 	cfg.MaxPacketsPerBatch = clampInt(defaultIntBelow(cfg.MaxPacketsPerBatch, 1, 10), 1, 64)
 	cfg.ARQWindowSize = clampInt(defaultIntBelow(cfg.ARQWindowSize, 1, 600), 1, 6000)
 	cfg.ARQInitialRTOSeconds = clampFloat(defaultFloatAtMostZero(cfg.ARQInitialRTOSeconds, 1.0), 0.05, 60.0)

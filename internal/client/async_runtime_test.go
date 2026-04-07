@@ -378,7 +378,6 @@ func TestResolverHealthLoopCollectsResolverTimeoutsWhenAutoDisableEnabled(t *tes
 	c.balancer.SetAutoDisableConfig(
 		true,
 		180*time.Second,
-		3*time.Second,
 	)
 
 	c.balancer.pendingStoreForTest(key, balancerResolverSample{

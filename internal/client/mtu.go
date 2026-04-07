@@ -155,7 +155,6 @@ func (c *Client) runResolverHealthLoop(ctx context.Context) {
 	}
 
 	recheckInterval := c.resolverHealthRecheckInterval()
-	pollInterval := c.resolverHealthPollInterval(recheckInterval)
 	parallelism := c.resolverHealthParallelism()
 
 	for {
@@ -174,7 +173,7 @@ func (c *Client) runResolverHealthLoop(ctx context.Context) {
 			c.runResolverHealthBatch(ctx, recheckInterval, parallelism)
 		}
 
-		timer := time.NewTimer(pollInterval)
+		timer := time.NewTimer(c.resolverHealthPollInterval(recheckInterval))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -193,14 +192,22 @@ func (c *Client) resolverHealthRecheckInterval() time.Duration {
 }
 
 func (c *Client) resolverHealthPollInterval(recheckInterval time.Duration) time.Duration {
-	pollInterval := recheckInterval / 4
-	if pollInterval < time.Second {
-		return time.Second
+	if c == nil || c.balancer == nil {
+		pollInterval := recheckInterval / 4
+		if pollInterval < time.Second {
+			return time.Second
+		}
+		if pollInterval > 5*time.Second {
+			return 5 * time.Second
+		}
+		return pollInterval
 	}
-	if pollInterval > 5*time.Second {
-		return 5 * time.Second
+	window := time.Duration(c.cfg.AutoDisableTimeoutWindowSeconds * float64(time.Second))
+	active := c.balancer.ActiveCount()
+	if active < 1 {
+		active = 1
 	}
-	return pollInterval
+	return autoDisableCheckIntervalForActiveCount(active, window)
 }
 
 func (c *Client) resolverHealthParallelism() int {
@@ -258,11 +265,12 @@ func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
 }
 
 func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
+	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
 		if ctx.Err() != nil {
 			return false
 		}
-		passed, _, err := c.sendUploadMTUProbe(ctx, conn, transport, c.syncedUploadMTU, mtuProbeOptions{
+		passed, _, err := c.sendUploadMTUProbe(ctx, conn, transport, c.syncedUploadMTU, timeout, mtuProbeOptions{
 			Quiet:   true,
 			IsRetry: attempt > 0,
 		})
@@ -274,11 +282,12 @@ func (c *Client) recheckResolverUploadMTU(ctx context.Context, conn Connection, 
 }
 
 func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection, transport *udpQueryTransport) bool {
+	timeout := c.resolverHealthProbeTimeout()
 	for attempt := 0; attempt < c.mtuTestRetries; attempt++ {
 		if ctx.Err() != nil {
 			return false
 		}
-		passed, _, err := c.sendDownloadMTUProbe(ctx, conn, transport, c.syncedDownloadMTU, c.syncedUploadMTU, mtuProbeOptions{
+		passed, _, err := c.sendDownloadMTUProbe(ctx, conn, transport, c.syncedDownloadMTU, c.syncedUploadMTU, timeout, mtuProbeOptions{
 			Quiet:   true,
 			IsRetry: attempt > 0,
 		})
@@ -287,6 +296,46 @@ func (c *Client) recheckResolverDownloadMTU(ctx context.Context, conn Connection
 		}
 	}
 	return false
+}
+
+func (c *Client) resolverHealthProbeTimeout() time.Duration {
+	timeout := c.mtuTestTimeout
+	if timeout <= 0 {
+		timeout = 4 * time.Second
+	}
+	if c == nil || c.balancer == nil {
+		return timeout
+	}
+
+	active := c.balancer.ActiveCount()
+	if active < 1 {
+		active = 1
+	}
+
+	switch {
+	case active <= 3:
+		if timeout < 7*time.Second {
+			timeout = 7 * time.Second
+		}
+	case active <= 5:
+		if timeout < 6*time.Second {
+			timeout = 6 * time.Second
+		}
+	case active <= 8:
+		if timeout < 5500*time.Millisecond {
+			timeout = 5500 * time.Millisecond
+		}
+	case active <= 10:
+		if timeout < 5*time.Second {
+			timeout = 5 * time.Second
+		}
+	case active <= 15:
+		if timeout < 4500*time.Millisecond {
+			timeout = 4500 * time.Millisecond
+		}
+	}
+
+	return timeout
 }
 
 func (c *Client) reactivateRecheckedResolver(conn Connection) {
@@ -525,7 +574,7 @@ func (c *Client) testUploadMTU(ctx context.Context, conn Connection, probeTransp
 		c.cfg.MinUploadMTU,
 		maxPayload,
 		func(candidate int, isRetry bool) (bool, time.Duration, error) {
-			return c.sendUploadMTUProbe(ctx, conn, probeTransport, candidate, mtuProbeOptions{
+			return c.sendUploadMTUProbe(ctx, conn, probeTransport, candidate, c.mtuTestTimeout, mtuProbeOptions{
 				IsRetry: isRetry,
 			})
 		},
@@ -546,7 +595,7 @@ func (c *Client) testDownloadMTU(ctx context.Context, conn Connection, probeTran
 		c.cfg.MinDownloadMTU,
 		c.cfg.MaxDownloadMTU,
 		func(candidate int, isRetry bool) (bool, time.Duration, error) {
-			return c.sendDownloadMTUProbe(ctx, conn, probeTransport, candidate, uploadMTU, mtuProbeOptions{
+			return c.sendDownloadMTUProbe(ctx, conn, probeTransport, candidate, uploadMTU, c.mtuTestTimeout, mtuProbeOptions{
 				IsRetry: isRetry,
 			})
 		},
@@ -655,7 +704,7 @@ func (c *Client) binarySearchMTU(ctx context.Context, label string, minValue, ma
 	return best, bestRTT
 }
 
-func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeTransport *udpQueryTransport, mtuSize int, options mtuProbeOptions) (bool, time.Duration, error) {
+func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeTransport *udpQueryTransport, mtuSize int, timeout time.Duration, options mtuProbeOptions) (bool, time.Duration, error) {
 	if mtuSize < 1+mtuProbeCodeLength {
 		return false, 0, nil
 	}
@@ -681,7 +730,7 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeT
 	}
 
 	startedAt := time.Now()
-	response, err := c.exchangeUDPQuery(probeTransport, query, c.mtuTestTimeout)
+	response, err := c.exchangeUDPQuery(probeTransport, query, timeout)
 	if err != nil {
 		c.logMTUProbe(
 			options.IsRetry,
@@ -763,7 +812,7 @@ func (c *Client) sendUploadMTUProbe(ctx context.Context, conn Connection, probeT
 	return ok, rtt, nil
 }
 
-func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, probeTransport *udpQueryTransport, mtuSize int, uploadMTU int, options mtuProbeOptions) (bool, time.Duration, error) {
+func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, probeTransport *udpQueryTransport, mtuSize int, uploadMTU int, timeout time.Duration, options mtuProbeOptions) (bool, time.Duration, error) {
 	if mtuSize < defaultMTUMinFloor {
 		return false, 0, nil
 	}
@@ -795,7 +844,7 @@ func (c *Client) sendDownloadMTUProbe(ctx context.Context, conn Connection, prob
 	}
 
 	startedAt := time.Now()
-	response, err := c.exchangeUDPQuery(probeTransport, query, c.mtuTestTimeout)
+	response, err := c.exchangeUDPQuery(probeTransport, query, timeout)
 	if err != nil {
 		c.logMTUProbe(
 			options.IsRetry,
