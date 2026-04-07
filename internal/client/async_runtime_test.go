@@ -126,28 +126,28 @@ func TestTrackResolverSendBoundsResolverPendingGrowth(t *testing.T) {
 	c := createTestClient(t)
 	base := time.Now()
 
-	c.resolverStatsMu.Lock()
+	c.balancer.mu.Lock()
 	for i := 0; i < resolverPendingHardCap+32; i++ {
-		c.resolverPending[resolverSampleKey{
+		c.balancer.pending[balancerResolverSampleKey{
 			resolverAddr: "127.0.0.1:5300",
 			dnsID:        uint16(i),
-		}] = resolverSample{
+		}] = balancerResolverSample{
 			serverKey: "resolver-a",
 			sentAt:    base.Add(-time.Minute),
 		}
 	}
-	c.resolverStatsMu.Unlock()
+	c.balancer.mu.Unlock()
 
 	packet := []byte{0x12, 0x34}
-	c.trackResolverSend(packet, "127.0.0.1:5300", "", "resolver-a", base)
+	c.balancer.TrackResolverSend(packet, "127.0.0.1:5300", "", "resolver-a", base, c.tunnelPacketTimeout, c.autoDisableCheckInterval(), c.autoDisableTimeoutWindow())
 
-	c.resolverStatsMu.RLock()
-	pendingCount := len(c.resolverPending)
-	_, inserted := c.resolverPending[resolverSampleKey{
+	c.balancer.mu.RLock()
+	pendingCount := len(c.balancer.pending)
+	_, inserted := c.balancer.pending[balancerResolverSampleKey{
 		resolverAddr: "127.0.0.1:5300",
 		dnsID:        binary.BigEndian.Uint16(packet),
 	}]
-	c.resolverStatsMu.RUnlock()
+	c.balancer.mu.RUnlock()
 
 	if pendingCount > resolverPendingHardCap {
 		t.Fatalf("expected resolverPending to stay bounded, got=%d hardCap=%d", pendingCount, resolverPendingHardCap)
@@ -362,13 +362,10 @@ func TestStartAsyncRuntimeCleansUpOnListenerStartFailure(t *testing.T) {
 	}
 }
 
-func TestStartAsyncRuntimeCollectsResolverTimeoutsEvenWhenHealthFeaturesDisabled(t *testing.T) {
+func TestResolverHealthLoopCollectsResolverTimeoutsWhenAutoDisableEnabled(t *testing.T) {
 	c := createTestClient(t)
-	c.cfg.ListenIP = "127.0.0.1"
-	c.cfg.ListenPort = 0
-	c.cfg.AutoDisableTimeoutServers = false
+	c.cfg.AutoDisableTimeoutServers = true
 	c.cfg.RecheckInactiveServersEnabled = false
-	c.initResolverRecheckMeta()
 
 	now := time.Now()
 	c.nowFn = func() time.Time {
@@ -376,41 +373,34 @@ func TestStartAsyncRuntimeCollectsResolverTimeoutsEvenWhenHealthFeaturesDisabled
 	}
 
 	addr := &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}
-	serverKey := ""
-	if len(c.connections) > 0 {
-		serverKey = c.connections[0].Key
-	}
-	key := resolverSampleKey{
+	serverKey := "resolver-a"
+	key := balancerResolverSampleKey{
 		resolverAddr: addr.String(),
 		dnsID:        0x1337,
 	}
 
-	c.resolverStatsMu.Lock()
-	c.resolverPending[key] = resolverSample{
+	c.balancer.mu.Lock()
+	c.balancer.pending[key] = balancerResolverSample{
 		serverKey: serverKey,
 		sentAt:    now.Add(-10 * time.Second),
 	}
-	c.resolverStatsMu.Unlock()
+	c.balancer.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if err := c.StartAsyncRuntime(ctx); err != nil {
-		t.Fatalf("StartAsyncRuntime returned error: %v", err)
-	}
-	defer c.StopAsyncRuntime()
+	go c.runResolverHealthLoop(ctx)
 
 	waitForResolverHealthCondition(t, 3*time.Second, func() bool {
-		c.resolverStatsMu.RLock()
-		sample, ok := c.resolverPending[key]
-		c.resolverStatsMu.RUnlock()
+		c.balancer.mu.RLock()
+		sample, ok := c.balancer.pending[key]
+		c.balancer.mu.RUnlock()
 		return ok && sample.timedOut
-	}, "expected resolver timeout sample to be collected even without auto-disable/recheck enabled")
+	}, "expected resolver timeout sample to be collected when auto-disable is enabled")
 }
 
 func TestHandleInboundPacketTreatsMissingTXTAsResolverSuccess(t *testing.T) {
 	c := buildTestClientWithResolvers(config.ClientConfig{}, "a", "b", "c", "d")
-	c.initResolverRecheckMeta()
 	addr := &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}
 
 	query, err := DnsParser.BuildTXTQuestionPacket("x.v.example.com", 16, 4096)
@@ -423,24 +413,27 @@ func TestHandleInboundPacketTreatsMissingTXTAsResolverSuccess(t *testing.T) {
 	}
 
 	dnsID := binary.BigEndian.Uint16(response[:2])
-	c.resolverPending[resolverSampleKey{
+	c.balancer.pending[balancerResolverSampleKey{
 		resolverAddr: addr.String(),
 		dnsID:        dnsID,
-	}] = resolverSample{
+	}] = balancerResolverSample{
 		serverKey: "a",
 		sentAt:    time.Now().Add(-200 * time.Millisecond),
 	}
 
 	c.handleInboundPacket(response, addr, "")
 
-	if len(c.resolverPending) != 0 {
-		t.Fatalf("expected resolverPending to be cleared after empty DNS success, got=%d", len(c.resolverPending))
+	if len(c.balancer.pending) != 0 {
+		t.Fatalf("expected resolverPending to be cleared after empty DNS success, got=%d", len(c.balancer.pending))
 	}
 }
 
 func TestHandleInboundPacketTreatsServerFailureWithoutTXTAsResolverFailure(t *testing.T) {
-	c := buildTestClientWithResolvers(config.ClientConfig{}, "a", "b", "c", "d")
-	c.initResolverRecheckMeta()
+	c := buildTestClientWithResolvers(config.ClientConfig{
+		AutoDisableTimeoutServers:       true,
+		AutoDisableTimeoutWindowSeconds: 10,
+		AutoDisableMinObservations:      1,
+	}, "a", "b", "c", "d")
 	addr := &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}
 
 	query, err := DnsParser.BuildTXTQuestionPacket("x.v.example.com", Enums.DNS_RECORD_TYPE_TXT, 4096)
@@ -453,25 +446,24 @@ func TestHandleInboundPacketTreatsServerFailureWithoutTXTAsResolverFailure(t *te
 	}
 
 	dnsID := binary.BigEndian.Uint16(response[:2])
-	c.resolverPending[resolverSampleKey{
+	c.balancer.pending[balancerResolverSampleKey{
 		resolverAddr: addr.String(),
 		dnsID:        dnsID,
-	}] = resolverSample{
+	}] = balancerResolverSample{
 		serverKey: "a",
 		sentAt:    time.Now().Add(-200 * time.Millisecond),
 	}
 
 	c.handleInboundPacket(response, addr, "")
 
-	if len(c.resolverPending) != 0 {
-		t.Fatalf("expected resolverPending to be cleared after SERVFAIL response, got=%d", len(c.resolverPending))
+	if len(c.balancer.pending) != 0 {
+		t.Fatalf("expected resolverPending to be cleared after SERVFAIL response, got=%d", len(c.balancer.pending))
 	}
-
-	state := testGetResolverHealthState(c, "a")
-	if state == nil {
-		t.Fatal("expected resolver health state to exist")
+	conn, ok := c.balancer.GetConnectionByKey("a")
+	if !ok {
+		t.Fatal("expected resolver a to exist")
 	}
-	if len(state.Events) != 1 {
-		t.Fatalf("expected one failure health event after SERVFAIL response, got=%d", len(state.Events))
+	if conn.WindowTimedOut != 1 {
+		t.Fatalf("expected one timeout-window failure after SERVFAIL response, got=%d", conn.WindowTimedOut)
 	}
 }
