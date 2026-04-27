@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/mlq"
 	"masterdnsvpn-go/internal/security"
+	"masterdnsvpn-go/internal/telemetry"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -33,10 +35,12 @@ const (
 )
 
 type Client struct {
-	cfg      config.ClientConfig
-	log      *logger.Logger
-	codec    *security.Codec
-	balancer *Balancer
+	cfg       config.ClientConfig
+	log       *logger.Logger
+	codec     *security.Codec
+	codecByDomain map[string]*security.Codec
+	balancer  *Balancer
+	telemetry *telemetry.RuntimeTelemetry
 
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
@@ -90,6 +94,16 @@ type Client struct {
 	rxDroppedPackets      atomic.Uint64
 	lastRXDropLogUnix     atomic.Int64
 
+	// Local scanner coordination (optional).
+	scannerOnce         sync.Once
+	scannerHTTP         *http.Client
+	scannerAddr         string
+	scannerClientID     string
+	scannerInstances    []scannerIdentity
+	scannerSpawned      bool
+	scannerStopHB       context.CancelFunc
+	scannerLastDemandAt atomic.Int64
+
 	// Async Runtime Workers & Channels
 	asyncWG              sync.WaitGroup
 	asyncCancel          context.CancelFunc
@@ -134,6 +148,18 @@ type Client struct {
 
 	// SOCKS5 brute-force rate limiter
 	socksRateLimit *socksRateLimiter
+
+	// Phase-1 fixed-layout TUI dashboard (no scrolling logs).
+	dashboard *autoProfileDashboard
+
+	telemetryPersistStarted atomic.Bool
+
+	// Full-lifecycle TUI dashboard (tview/tcell).
+	ui *fullTUI
+
+	// Runtime adaptation controller (v0.1).
+	runtimeController        *runtimeController
+	runtimeControllerStarted atomic.Bool
 }
 
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -229,11 +255,22 @@ func BootstrapLoadedConfig(cfg config.ClientConfig, logPath string) (*Client, er
 	}
 
 	c := New(cfg, log, codec)
-	if err := c.BuildConnectionMap(); err != nil {
-		if c.log != nil {
-			c.log.Errorf("<red>%v</red>", err)
+	if cfg.DomainKeyringFile != "" {
+		if m, _, err := buildCodecByDomain(cfg.ConfigDir, cfg.DomainKeyringFile); err == nil && len(m) > 0 {
+			c.codecByDomain = m
+		} else if err != nil {
+			return nil, fmt.Errorf("client DOMAIN_KEYRING_FILE load failed: %w", err)
 		}
-		return nil, err
+	}
+	// When the local scanner is enabled, inventory is scanner-owned; the client
+	// may start with zero configured resolvers and receive warm candidates later.
+	if !cfg.ScannerEnabled || len(cfg.Resolvers) > 0 {
+		if err := c.BuildConnectionMap(); err != nil {
+			if c.log != nil {
+				c.log.Errorf("<red>%v</red>", err)
+			}
+			return nil, err
+		}
 	}
 	return c, nil
 }
@@ -249,6 +286,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		log:                 log,
 		codec:               codec,
 		balancer:            NewBalancer(cfg.ResolverBalancingStrategy, log),
+		telemetry:           telemetry.NewRuntimeTelemetry(),
 		uploadCompression:   uint8(cfg.UploadCompressionType),
 		downloadCompression: uint8(cfg.DownloadCompressionType),
 		mtuCryptoOverhead:   mtuCryptoOverhead(cfg.DataEncryptionMethod),
@@ -315,6 +353,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		cfg.AutoDisableTimeoutServers,
 		time.Duration(cfg.AutoDisableTimeoutWindowSeconds*float64(time.Second)),
 	)
+	c.balancer.SetTelemetry(c.telemetry)
 
 	c.balancer.SetResolverDisabledHandler(func(conn *Connection, cause string) {
 		c.appendMTURemovedServerLine(conn, cause)
@@ -326,6 +365,13 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 
 	c.pingManager = newPingManager(c)
 	return c
+}
+
+func (c *Client) Telemetry() *telemetry.RuntimeTelemetry {
+	if c == nil {
+		return nil
+	}
+	return c.telemetry
 }
 
 func (c *Client) nextSessionInitRetryDelay(failures int) time.Duration {
@@ -352,8 +398,16 @@ func (c *Client) Run(ctx context.Context) error {
 	sessionInitRetryDelay := time.Duration(0)
 	sessionInitRetryFailures := 0
 
+	// Single full-lifecycle TUI (if interactive). When enabled it owns terminal output.
+	c.startFullTUIIfInteractive()
+	defer c.stopFullTUI()
+	defer c.stopScannerHB()
+
 	// Ensure local DNS cache is loaded from file if persistence is enabled
 	c.ensureLocalDNSCacheLoaded()
+
+	// Optional local scanner warm-start (inventory-first). Best-effort: runtime must not crash if scanner is down.
+	c.ensureScannerOnce(ctx)
 
 	for {
 		select {
@@ -362,7 +416,48 @@ func (c *Client) Run(ctx context.Context) error {
 			c.StopAsyncRuntime()
 			return nil
 		default:
+			if !c.successMTUChecks && c.cfg.AutoProfileResolvers {
+				if c.ui != nil {
+					c.ui.SetPhase("profiling")
+				}
+				if err := c.AutoProfileBootstrapAndApply(ctx); err != nil {
+					c.log.Errorf("<red>Auto profiling failed: %v</red>", err)
+					c.successMTUChecks = false
+					select {
+					case <-ctx.Done():
+						c.notifySessionCloseBurst(time.Second)
+						c.StopAsyncRuntime()
+						return nil
+					case <-time.After(5 * time.Second):
+					}
+					continue
+				}
+			}
+
 			if !c.successMTUChecks {
+				// In scanner-owned inventory mode, do not run client-side MTU scanning across the whole pool.
+				// Use a conservative bootstrap MTU from config; runtime observes live behavior and can adapt.
+				if c.cfg.ScannerEnabled {
+					if c.ui != nil {
+						c.ui.SetPhase("scanner-warm")
+					}
+					up := c.cfg.MinUploadMTU
+					down := c.cfg.MinDownloadMTU
+					if up <= 0 {
+						up = 35
+					}
+					if down <= 0 {
+						down = 100
+					}
+					c.applySyncedMTUState(up, down, c.encodedCharsForPayload(up))
+					c.successMTUChecks = true
+				}
+			}
+
+			if !c.successMTUChecks {
+				if c.ui != nil {
+					c.ui.SetPhase("mtu-tests")
+				}
 				if err := c.RunInitialMTUTests(ctx); err != nil {
 					c.log.Errorf("<red>MTU tests failed: %v</red>", err)
 					c.successMTUChecks = false
@@ -391,13 +486,57 @@ func (c *Client) Run(ctx context.Context) error {
 				}
 
 				c.successMTUChecks = true
-				if c.resolverHealthStarted.CompareAndSwap(false, true) {
-					go c.runResolverHealthLoop(ctx)
+				if c.runtimeController == nil {
+					c.runtimeController = newRuntimeController(c)
+				}
+				if c.runtimeController != nil && c.runtimeControllerStarted.CompareAndSwap(false, true) {
+					go c.runtimeController.Run(ctx)
+				}
+				// Legacy health loop is disabled when the runtime controller is present (controller owns reserve probing).
+				if c.runtimeController == nil {
+					if c.resolverHealthStarted.CompareAndSwap(false, true) {
+						go c.runResolverHealthLoop(ctx)
+					}
 				}
 				c.ShortPrintBanner()
 			}
 
+			// AutoProfile can make MTU checks successful without entering the legacy MTU block.
+			// Ensure background health/controller loops are started in both paths.
+			if c.successMTUChecks {
+				if c.runtimeController == nil {
+					c.runtimeController = newRuntimeController(c)
+				}
+				if c.runtimeController != nil && c.runtimeControllerStarted.CompareAndSwap(false, true) {
+					go c.runtimeController.Run(ctx)
+				}
+				if c.runtimeController == nil {
+					if c.resolverHealthStarted.CompareAndSwap(false, true) {
+						go c.runResolverHealthLoop(ctx)
+					}
+				}
+			}
+
 			if !c.sessionReady {
+				// Scanner-owned inventory: do not attempt session init until we have at least one ready lane.
+				if c.cfg.ScannerEnabled && (c.balancer == nil || c.balancer.ActiveCount() < 1) {
+					if c.ui != nil {
+						c.ui.SetPhase("scanner-wait")
+					}
+					_ = c.scannerWarmStartAll(ctx)
+					select {
+					case <-ctx.Done():
+						c.notifySessionCloseBurst(time.Second)
+						c.StopAsyncRuntime()
+						return nil
+					case <-time.After(900 * time.Millisecond):
+					}
+					continue
+				}
+
+				if c.ui != nil {
+					c.ui.SetPhase("connecting")
+				}
 				retries := c.cfg.MTUTestRetries
 				if retries < 1 {
 					retries = 3
@@ -418,6 +557,9 @@ func (c *Client) Run(ctx context.Context) error {
 					continue
 				}
 				c.log.Infof("<green>✅ Session Initialized Successfully (ID: <cyan>%d</cyan>)</green>", c.sessionID)
+				if c.ui != nil {
+					c.ui.SetPhase("connected")
+				}
 
 				sessionInitRetryFailures = 0
 				sessionInitRetryDelay = 0
@@ -430,6 +572,11 @@ func (c *Client) Run(ctx context.Context) error {
 
 				if c.pingManager != nil {
 					c.pingManager.Start(ctx)
+				}
+
+				// Periodic telemetry snapshot (instrumentation-only, no adaptation).
+				if c.telemetryPersistStarted.CompareAndSwap(false, true) {
+					go c.runTelemetryPersistLoop(ctx)
 				}
 
 				c.ensureLocalDNSCachePersistence(ctx)

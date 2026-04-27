@@ -18,6 +18,20 @@
 # All domains must be handled by the same server. Do not use different domains across multiple servers.
 DOMAINS = ["v.domain.com"]
 
+# Phase-1: resolver profiling first (derive runtime MTU/duplication/failover from measurements).
+# If enabled, the client will profile resolvers and build a derived runtime profile before
+# starting normal session runtime.
+AUTO_PROFILE_RESOLVERS = false
+
+# Optional registry path for saving resolver profiles across runs.
+# If empty, defaults to "resolver_registry.json" next to the config file.
+RESOLVER_REGISTRY_FILE = ""
+
+# Warm start is attempted when registry profiles are fresh enough.
+# If warm start is not possible, the client falls back to neutral profiling.
+AUTO_PROFILE_WARM_MAX_AGE_SECONDS = 900.0
+AUTO_PROFILE_WARM_MIN_VIABLE = 6
+
 # Encryption method for tunnel payloads.
 # Allowed values:
 # 0 = None

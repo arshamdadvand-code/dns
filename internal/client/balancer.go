@@ -18,6 +18,7 @@ import (
 
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
+	"masterdnsvpn-go/internal/telemetry"
 )
 
 const (
@@ -89,6 +90,7 @@ type Balancer struct {
 
 	mu           sync.RWMutex
 	log          *logger.Logger
+	telemetry    *telemetry.RuntimeTelemetry
 	connections  []Connection
 	indexByKey   map[string]int
 	activeIDs    []int
@@ -105,6 +107,13 @@ type Balancer struct {
 	autoDisableTimeoutWindow time.Duration
 	onResolverDisabled       func(*Connection, string)
 	confirmResolverDown      func(*Connection, time.Duration) bool
+}
+
+func (b *Balancer) SetTelemetry(t *telemetry.RuntimeTelemetry) {
+	if b == nil {
+		return
+	}
+	b.telemetry = t
 }
 
 type connectionStats struct {
@@ -360,6 +369,9 @@ func (b *Balancer) ReportTimeout(serverKey string, now time.Time, window time.Du
 	stats := b.statsForKey(serverKey)
 	if stats == nil {
 		return false
+	}
+	if b.telemetry != nil {
+		b.telemetry.NoteTimeout(serverKey)
 	}
 	stats.lost.Add(1)
 	stats.applyHalfLife()
@@ -619,9 +631,9 @@ func (b *Balancer) TrackResolverSuccess(
 	localAddr string,
 	receivedAt time.Time,
 	rtt time.Duration,
-) {
+) (string, time.Duration, bool) {
 	if b == nil || len(packet) < 2 || addr == nil {
-		return
+		return "", 0, false
 	}
 
 	b.mu.RLock()
@@ -644,7 +656,7 @@ func (b *Balancer) TrackResolverSuccess(
 	shard.mu.Unlock()
 
 	if !ok || sample.serverKey == "" {
-		return
+		return "", 0, false
 	}
 	if sample.timedOut && !sample.timedOutAt.IsZero() {
 		b.RetractTimeout(sample.serverKey, receivedAt, window)
@@ -655,6 +667,7 @@ func (b *Balancer) TrackResolverSuccess(
 	if rtt > 0 {
 		b.ReportSuccess(sample.serverKey, rtt)
 	}
+	return sample.serverKey, rtt, true
 }
 
 func (b *Balancer) TrackResolverFailure(
@@ -662,9 +675,9 @@ func (b *Balancer) TrackResolverFailure(
 	addr *net.UDPAddr,
 	localAddr string,
 	failedAt time.Time,
-) {
+) (string, bool) {
 	if b == nil || len(packet) < 2 || addr == nil {
-		return
+		return "", false
 	}
 
 	b.mu.RLock()
@@ -688,9 +701,10 @@ func (b *Balancer) TrackResolverFailure(
 	shard.mu.Unlock()
 
 	if !ok || sample.serverKey == "" || sample.timedOut || !autoDisable {
-		return
+		return sample.serverKey, ok && sample.serverKey != ""
 	}
 	b.ReportTimeout(sample.serverKey, failedAt, window, 1)
+	return sample.serverKey, true
 }
 
 func (b *Balancer) CollectExpiredResolverTimeouts(

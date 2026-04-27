@@ -258,6 +258,13 @@ func main() {
 		}
 	}
 
+	// Persist a minimal telemetry snapshot for evidence-based runtime work (v0.1).
+	if p, perr := app.PersistTelemetrySummary(""); perr == nil && p != "" && log != nil {
+		log.Infof("\U0001F4BE <green>Telemetry summary persisted</green> <gray>|</gray> path=<cyan>%s</cyan>", p)
+	} else if perr != nil && log != nil {
+		log.Warnf("<yellow>Telemetry summary persist failed: %v</yellow>", perr)
+	}
+
 	if log != nil {
 		log.Infof("\U0001F6D1 <red>Shutting down...</red>")
 	}

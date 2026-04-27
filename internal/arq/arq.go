@@ -20,6 +20,7 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/telemetry"
 )
 
 // StreamState mirrors Python's Stream_State enum
@@ -127,6 +128,7 @@ type ARQ struct {
 	enqueuer             PacketEnqueuer
 	localConn            io.ReadWriteCloser
 	logger               Logger
+	telemetry            telemetry.Sink
 
 	mtu             int
 	compressionType uint8
@@ -298,6 +300,7 @@ type Config struct {
 	CompressionType             uint8
 	IsClient                    bool
 	InboundQueueSize            int
+	Telemetry                   telemetry.Sink
 }
 
 type CloseOptions struct {
@@ -346,6 +349,7 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		enqueuer:  enqueuer,
 		localConn: localConn,
 		logger:    logger,
+		telemetry: cfg.Telemetry,
 		mtu:       mtu,
 
 		sndBuf:        make(map[uint16]*arqDataItem),
@@ -1152,6 +1156,9 @@ func (a *ARQ) ioLoop() {
 
 		n, err := localConn.Read(buf)
 		if n > 0 {
+			if a.telemetry != nil {
+				a.telemetry.AddUsefulIngressTX(n)
+			}
 			transientReadSince = time.Time{}
 			raw := append([]byte(nil), buf[:n]...)
 
@@ -1732,6 +1739,9 @@ func (a *ARQ) writeLoop() {
 						n, err := conn.Write(remaining)
 						a.writeLock.Unlock()
 						if n > 0 {
+							if a.telemetry != nil {
+								a.telemetry.AddUsefulDeliveredRX(n)
+							}
 							remaining = remaining[n:]
 						}
 						if err == nil {
@@ -1831,6 +1841,9 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 		if info.SampleEligible && info.Dispatched && !info.LastSentAt.IsZero() {
 			sample = now.Sub(info.LastSentAt)
 			sampleEligible = true
+		}
+		if a.telemetry != nil && info != nil && len(info.Data) > 0 {
+			a.telemetry.AddUsefulAckedTX(len(info.Data))
 		}
 		delete(a.sndBuf, sn)
 		if a.deferredClose || a.state == StateDraining {

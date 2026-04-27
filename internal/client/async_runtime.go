@@ -554,6 +554,9 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 			if err != nil {
 				conns = nil
 			}
+			if c.telemetry != nil {
+				c.telemetry.NoteDuplicationSelection(targetCount, len(conns))
+			}
 
 			if len(conns) == 0 {
 				c.applyPlannerNoConnectionPolicy(task)
@@ -677,15 +680,8 @@ func (c *Client) buildPlannedOutboundFrames(
 	preparedDomainByName map[string]preparedTunnelDomain,
 	frames []encodedOutboundDatagram,
 ) ([]encodedOutboundDatagram, error) {
-	encoded, err := c.buildEncodedAutoWithCompressionTrace(task.opts)
-	if err != nil {
-		return nil, err
-	}
-
-	var (
-		firstDomain    string
-		firstDNSPacket []byte
-	)
+	var encodedByDomain map[string][]byte
+	controlOnly := isControlPlanePacketType(task.opts.PacketType)
 
 	if packetByDomain != nil {
 		clear(packetByDomain)
@@ -701,6 +697,9 @@ func (c *Client) buildPlannedOutboundFrames(
 		domain := resolverConn.Domain
 		if domain == "" {
 			domain = defaultDomain
+		}
+		if controlOnly && domain != defaultDomain {
+			continue
 		}
 
 		addr, err := c.getResolverUDPAddr(resolverConn)
@@ -720,30 +719,29 @@ func (c *Client) buildPlannedOutboundFrames(
 			preparedDomainByName[domain] = prepared
 		}
 
-		var dnsPacket []byte
-		switch {
-		case firstDNSPacket == nil:
+		// Per-domain encryption key: encoded payload differs by domain when DOMAIN_KEYRING_FILE is used.
+		if encodedByDomain == nil {
+			encodedByDomain = make(map[string][]byte, min(8, len(conns)))
+		}
+		encoded, ok := encodedByDomain[domain]
+		if !ok {
+			encoded, err = c.buildEncodedAutoWithCompressionTraceForDomain(domain, task.opts)
+			if err != nil {
+				return nil, err
+			}
+			encodedByDomain[domain] = encoded
+		}
+
+		if packetByDomain == nil {
+			packetByDomain = make(map[string][]byte, min(16, len(conns)))
+		}
+		dnsPacket, cached := packetByDomain[domain]
+		if !cached {
 			dnsPacket, err = DnsParser.BuildTunnelTXTQuestionPacketPrepared(prepared.normalized, prepared.qname, encoded, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
 			if err != nil {
 				continue
 			}
-			firstDomain = domain
-			firstDNSPacket = dnsPacket
-		case domain == firstDomain:
-			dnsPacket = firstDNSPacket
-		default:
-			if packetByDomain == nil {
-				packetByDomain = make(map[string][]byte, max(0, len(conns)-1))
-			}
-			var cached bool
-			dnsPacket, cached = packetByDomain[domain]
-			if !cached {
-				dnsPacket, err = DnsParser.BuildTunnelTXTQuestionPacketPrepared(prepared.normalized, prepared.qname, encoded, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
-				if err != nil {
-					continue
-				}
-				packetByDomain[domain] = dnsPacket
-			}
+			packetByDomain[domain] = dnsPacket
 		}
 
 		frames = append(frames, encodedOutboundDatagram{
@@ -754,6 +752,22 @@ func (c *Client) buildPlannedOutboundFrames(
 	}
 
 	return frames, nil
+}
+
+func isControlPlanePacketType(packetType uint8) bool {
+	// Control-plane here means: pre-session, session init/keepalive, and link maintenance.
+	// Data-plane means: stream data and retransmits. This split allows multi-domain/key
+	// "data lanes" to carry traffic only after the session cookie is established.
+	switch packetType {
+	case Enums.PACKET_SESSION_INIT,
+		Enums.PACKET_MTU_UP_REQ,
+		Enums.PACKET_MTU_DOWN_REQ,
+		Enums.PACKET_PING,
+		Enums.PACKET_SESSION_CLOSE:
+		return true
+	default:
+		return false
+	}
 }
 
 // asyncWriterWorker sends already-built DNS packets on the assigned socket.
@@ -789,7 +803,10 @@ func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPCon
 				if frame.addr == nil || len(frame.packet) == 0 {
 					continue
 				}
-				if _, err := conn.WriteToUDP(frame.packet, frame.addr); err == nil {
+				if n, err := conn.WriteToUDP(frame.packet, frame.addr); err == nil {
+					if c.telemetry != nil {
+						c.telemetry.AddWireTXForResolver(frame.serverKey, n)
+					}
 					c.balancer.TrackResolverSend(
 						frame.packet,
 						frame.addr.String(),
@@ -829,6 +846,9 @@ func (c *Client) asyncReaderWorker(ctx context.Context, id int, conn *net.UDPCon
 					return
 				}
 				continue
+			}
+			if c.telemetry != nil && addr != nil {
+				c.telemetry.AddWireRXForResolver(addr.String(), n)
 			}
 
 			if n < 12 { // Basic DNS header length
@@ -884,36 +904,50 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr, localAddr s
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
 			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil && parsed.Header.RCode != 0 {
-				c.balancer.TrackResolverFailure(
+				serverKey, _ := c.balancer.TrackResolverFailure(
 					data,
 					addr,
 					localAddr,
 					receivedAt,
 				)
+				if c.telemetry != nil && serverKey != "" {
+					c.telemetry.NoteRcodeFailure(serverKey, parsed.Header.RCode)
+				}
 			} else {
-				c.balancer.TrackResolverSuccess(
+				serverKey, rtt, ok := c.balancer.TrackResolverSuccess(
 					data,
 					addr,
 					localAddr,
 					receivedAt,
 					0,
 				)
+				if c.telemetry != nil && ok && serverKey != "" {
+					_ = rtt
+					c.telemetry.NoteNoTunnelAnswer(serverKey)
+				}
 			}
 			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			// c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
 			return
 		}
 		// c.log.Debugf("\U0001F6A8 <red>Failed to parse VPN packet from DNS response: %v from %v</red>", err, addr)
+		if c.telemetry != nil && addr != nil {
+			// Attribution is not guaranteed on this path; count aggregate only.
+			c.telemetry.NoteOtherFailure(addr.String())
+		}
 		return
 	}
 
-	c.balancer.TrackResolverSuccess(
+	serverKey, rtt, ok := c.balancer.TrackResolverSuccess(
 		data,
 		addr,
 		localAddr,
 		time.Now(),
 		0,
 	)
+	if c.telemetry != nil && ok && serverKey != "" {
+		c.telemetry.NoteTunnelOK(serverKey, rtt)
+	}
 	// if c.log != nil && c.log.Enabled(logger.LevelDebug) && vpnPacket.PacketType != Enums.PACKET_PONG {
 	// 	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_ACK {
 	// 		c.log.Debugf("Client received ACK | Stream: %d | Seq: %d", vpnPacket.StreamID, vpnPacket.SequenceNum)

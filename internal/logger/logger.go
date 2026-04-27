@@ -167,6 +167,24 @@ func (l *Logger) Enabled(level int) bool {
 	return l != nil && level >= l.level
 }
 
+func (l *Logger) ConsoleWriter() io.Writer {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.consoleWriter
+}
+
+func (l *Logger) SetConsoleWriter(w io.Writer) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	l.consoleWriter = w
+	l.mu.Unlock()
+}
+
 func stripColorTags(text string) string {
 	start := strings.IndexByte(text, '<')
 	if start == -1 {

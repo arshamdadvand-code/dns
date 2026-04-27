@@ -169,7 +169,9 @@ func (c *Client) runResolverHealthLoop(ctx context.Context) {
 			c.tunnelPacketTimeout,
 		)
 
-		if c.cfg.RecheckInactiveServersEnabled {
+		// Inventory maintenance is scanner-owned. When the scanner is enabled, the
+		// client must not run scanner-style rechecks over the inactive pool.
+		if c.cfg.RecheckInactiveServersEnabled && !c.runtimeControllerPlanned() && !c.cfg.ScannerEnabled {
 			c.runResolverHealthBatch(ctx, recheckInterval, parallelism)
 		}
 

@@ -1,0 +1,26 @@
+[
+  {
+    "domain": "0.7x0.ir",
+    "enabled": true,
+    "encryption_method": 1,
+    "instance_id": "0.7x0.ir",
+    "intent": "",
+    "key_fingerprint": "bdbdf6069b71ed3f64a3de6782337140024379875b13a04c91d1a1876f36a574"
+  },
+  {
+    "domain": "1.7a8.ir",
+    "enabled": true,
+    "encryption_method": 1,
+    "instance_id": "1.7a8.ir",
+    "intent": "",
+    "key_fingerprint": "931582e19036557f51f0fd42ed0a44e33d497dcce329544c42c48e580345350a"
+  },
+  {
+    "domain": "2.a5t.ir",
+    "enabled": true,
+    "encryption_method": 1,
+    "instance_id": "2.a5t.ir",
+    "intent": "",
+    "key_fingerprint": "e43e01d08905d5c648696cd6fd2ddf52ffc1cf5838373e2c6d9df264d704f83d"
+  }
+]

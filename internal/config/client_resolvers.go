@@ -23,6 +23,17 @@ const (
 	maxResolverHosts    = 65536
 )
 
+type ResolverFileStats struct {
+	TotalLines             int
+	BlankLines             int
+	CommentLines           int
+	InvalidFormatLines     int
+	DuplicateLines         int
+	HardInvalidScopeLines  int
+	UniqueResolvers        int
+	ExpandedFromCIDR       int
+}
+
 type ResolverAddress struct {
 	IP   string
 	Port int
@@ -35,17 +46,23 @@ type resolverTarget struct {
 }
 
 func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, error) {
+	endpoints, resolverMap, _, err := LoadClientResolversWithStats(filename)
+	return endpoints, resolverMap, err
+}
+
+func LoadClientResolversWithStats(filename string) ([]ResolverAddress, map[string]int, ResolverFileStats, error) {
 	path, err := filepath.Abs(filename)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, ResolverFileStats{}, err
 	}
 
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("resolver file not found: %s", path)
+		return nil, nil, ResolverFileStats{}, fmt.Errorf("resolver file not found: %s", path)
 	}
 	defer file.Close()
 
+	stats := ResolverFileStats{}
 	endpoints := make([]ResolverAddress, 0, 64)
 	resolverMap := make(map[string]int, 64)
 	seenIPs := make(map[string]struct{}, 64)
@@ -54,34 +71,46 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
+		stats.TotalLines++
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
+			stats.BlankLines++
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			stats.CommentLines++
 			continue
 		}
 
 		target, port, err := parseResolverEntry(line)
 		if err != nil {
+			stats.InvalidFormatLines++
 			continue
 		}
 
 		if !target.isPrefix {
-			addResolver(&endpoints, resolverMap, seenIPs, target.addr.String(), port)
+			if isHardInvalidResolverAddr(target.addr) {
+				stats.HardInvalidScopeLines++
+				continue
+			}
+			addResolverWithStats(&endpoints, resolverMap, seenIPs, target.addr.String(), port, &stats)
 			continue
 		}
 
 		usableHosts, ok := usableHostCount(target.prefix)
 		if !ok || usableHosts > maxResolverHosts {
+			stats.InvalidFormatLines++
 			continue
 		}
 
-		appendPrefixResolvers(&endpoints, resolverMap, seenIPs, target.prefix, port)
+		appendPrefixResolversWithStats(&endpoints, resolverMap, seenIPs, target.prefix, port, &stats)
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to read resolver file %s: %w", path, err)
+		return nil, nil, ResolverFileStats{}, fmt.Errorf("failed to read resolver file %s: %w", path, err)
 	}
 	if len(endpoints) == 0 {
-		return nil, nil, fmt.Errorf("no valid resolvers found in %s", path)
+		return nil, nil, stats, fmt.Errorf("no valid resolvers found in %s", path)
 	}
 
 	sort.Slice(endpoints, func(i, j int) bool {
@@ -91,11 +120,15 @@ func LoadClientResolvers(filename string) ([]ResolverAddress, map[string]int, er
 		return endpoints[i].IP < endpoints[j].IP
 	})
 
-	return endpoints, resolverMap, nil
+	stats.UniqueResolvers = len(endpoints)
+	return endpoints, resolverMap, stats, nil
 }
 
-func addResolver(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, ip string, port int) {
+func addResolverWithStats(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, ip string, port int, stats *ResolverFileStats) {
 	if _, exists := seenIPs[ip]; exists {
+		if stats != nil {
+			stats.DuplicateLines++
+		}
 		return
 	}
 	seenIPs[ip] = struct{}{}
@@ -108,7 +141,7 @@ func addResolver(endpoints *[]ResolverAddress, resolverMap map[string]int, seenI
 	})
 }
 
-func appendPrefixResolvers(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, prefix netip.Prefix, port int) {
+func appendPrefixResolversWithStats(endpoints *[]ResolverAddress, resolverMap map[string]int, seenIPs map[string]struct{}, prefix netip.Prefix, port int, stats *ResolverFileStats) {
 	prefix = prefix.Masked()
 	first, last := hostRange(prefix)
 	if !first.IsValid() || !last.IsValid() {
@@ -116,11 +149,37 @@ func appendPrefixResolvers(endpoints *[]ResolverAddress, resolverMap map[string]
 	}
 
 	for addr := first; ; addr = addr.Next() {
-		addResolver(endpoints, resolverMap, seenIPs, addr.String(), port)
+		if stats != nil {
+			stats.ExpandedFromCIDR++
+		}
+		if isHardInvalidResolverAddr(addr) {
+			if stats != nil {
+				stats.HardInvalidScopeLines++
+			}
+		} else {
+			addResolverWithStats(endpoints, resolverMap, seenIPs, addr.String(), port, stats)
+		}
 		if addr == last {
 			return
 		}
 	}
+}
+
+func isHardInvalidResolverAddr(addr netip.Addr) bool {
+	if !addr.IsValid() {
+		return true
+	}
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	if addr.Is4() {
+		v4 := addr.As4()
+		if v4[0] == 255 && v4[1] == 255 && v4[2] == 255 && v4[3] == 255 {
+			return true
+		}
+	}
+	return false
 }
 
 func parseResolverEntry(line string) (resolverTarget, int, error) {

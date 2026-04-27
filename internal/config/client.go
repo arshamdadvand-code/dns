@@ -27,6 +27,8 @@ type ClientConfig struct {
 	ConfigDir                             string            `toml:"-"`
 	ConfigPath                            string            `toml:"-"`
 	ResolversFilePath                     string            `toml:"-"`
+	ResolverFileStats                     ResolverFileStats `toml:"-"`
+	DefinedTOMLKeys                       map[string]bool   `toml:"-"`
 	explicitRX_TX_Workers                 bool              `toml:"-"`
 	explicitTunnelProcessWorkers          bool              `toml:"-"`
 	ProtocolType                          string            `toml:"PROTOCOL_TYPE"`
@@ -58,6 +60,9 @@ type ClientConfig struct {
 	CompressionMinSize                    int               `toml:"COMPRESSION_MIN_SIZE"`
 	DataEncryptionMethod                  int               `toml:"DATA_ENCRYPTION_METHOD"`
 	EncryptionKey                         string            `toml:"ENCRYPTION_KEY"`
+	// Optional per-domain keyring allowing multiple logical instances (domain+key+method)
+	// to share one client runtime. When set, it overrides EncryptionKey per domain.
+	DomainKeyringFile                     string            `toml:"DOMAIN_KEYRING_FILE"`
 	MinUploadMTU                          int               `toml:"MIN_UPLOAD_MTU"`
 	MinDownloadMTU                        int               `toml:"MIN_DOWNLOAD_MTU"`
 	MaxUploadMTU                          int               `toml:"MAX_UPLOAD_MTU"`
@@ -115,6 +120,21 @@ type ClientConfig struct {
 	ARQTerminalAckWaitTimeoutSec          float64           `toml:"ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS"`
 	Resolvers                             []ResolverAddress `toml:"-"`
 	ResolverMap                           map[string]int    `toml:"-"`
+
+	// Phase-1 bootstrap profiling mode:
+	// If enabled, the client profiles resolvers first and derives runtime
+	// parameters from the observed distribution, instead of relying on
+	// pre-tuned MTU assumptions in the config file.
+	AutoProfileResolvers         bool    `toml:"AUTO_PROFILE_RESOLVERS"`
+	ResolverRegistryFile         string  `toml:"RESOLVER_REGISTRY_FILE"`
+	AutoProfileWarmMaxAgeSeconds float64 `toml:"AUTO_PROFILE_WARM_MAX_AGE_SECONDS"`
+	AutoProfileWarmMinViable     int     `toml:"AUTO_PROFILE_WARM_MIN_VIABLE"`
+
+	// Local scanner service (inventory-first, instance-aware).
+	ScannerEnabled    bool   `toml:"SCANNER_ENABLED"`
+	ScannerAddr       string `toml:"SCANNER_ADDR"`
+	ScannerSpawn      bool   `toml:"SCANNER_SPAWN"`
+	ScannerInstanceID string `toml:"SCANNER_INSTANCE_ID"`
 }
 
 type ClientConfigOverrides struct {
@@ -159,6 +179,7 @@ func defaultClientConfig() ClientConfig {
 		CompressionMinSize:                    compression.DefaultMinSize,
 		DataEncryptionMethod:                  1,
 		EncryptionKey:                         "",
+		DomainKeyringFile:                     "",
 		MinUploadMTU:                          38,
 		MinDownloadMTU:                        100,
 		MaxUploadMTU:                          150,
@@ -212,6 +233,16 @@ func defaultClientConfig() ClientConfig {
 		ARQDataNackRepeatSeconds:              1.0,
 		ARQTerminalDrainTimeoutSec:            120.0,
 		ARQTerminalAckWaitTimeoutSec:          90.0,
+
+		AutoProfileResolvers:         false,
+		ResolverRegistryFile:         "",
+		AutoProfileWarmMaxAgeSeconds: 900.0,
+		AutoProfileWarmMinViable:     6,
+
+		ScannerEnabled:    false,
+		ScannerAddr:       "127.0.0.1:18777",
+		ScannerSpawn:      true,
+		ScannerInstanceID: "",
 	}
 }
 
@@ -233,6 +264,7 @@ func loadClientConfigFile(filename string) (ClientConfig, error) {
 	cfg.ConfigPath = path
 	cfg.ConfigDir = filepath.Dir(path)
 	cfg.ResolversFilePath = ""
+	cfg.DefinedTOMLKeys = map[string]bool{}
 
 	switch format {
 	case configSourceJSON:
@@ -244,6 +276,7 @@ func loadClientConfigFile(filename string) (ClientConfig, error) {
 		if err != nil {
 			return cfg, fmt.Errorf("parse JSON failed for %s: %w", path, err)
 		}
+		cfg.DefinedTOMLKeys = mapDefinedFieldNamesToTOMLKeys(defined, cfg)
 		cfg.explicitRX_TX_Workers = defined["RX_TX_Workers"]
 		cfg.explicitTunnelProcessWorkers = defined["TunnelProcessWorkers"]
 	default:
@@ -251,6 +284,7 @@ func loadClientConfigFile(filename string) (ClientConfig, error) {
 		if err != nil {
 			return cfg, fmt.Errorf("parse TOML failed for %s: %w", path, err)
 		}
+		cfg.DefinedTOMLKeys = computeDefinedTOMLKeys(meta, cfg)
 		cfg.explicitRX_TX_Workers = meta.IsDefined("RX_TX_WORKERS")
 		cfg.explicitTunnelProcessWorkers = meta.IsDefined("TUNNEL_PROCESS_WORKERS")
 	}
@@ -279,6 +313,7 @@ func loadClientConfigFromJSONBase64(encoded string) (ClientConfig, error) {
 	cfg.ConfigDir = currentWorkingConfigDir()
 	cfg.ConfigPath = "<json_base64>"
 	cfg.ResolversFilePath = ""
+	cfg.DefinedTOMLKeys = mapDefinedFieldNamesToTOMLKeys(defined, cfg)
 	cfg.explicitRX_TX_Workers = defined["RX_TX_Workers"]
 	cfg.explicitTunnelProcessWorkers = defined["TunnelProcessWorkers"]
 	return cfg, nil
@@ -466,8 +501,9 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	cfg.MTUReactiveAddedServerLogFormat = strings.TrimSpace(cfg.MTUReactiveAddedServerLogFormat)
 
 	cfg.EncryptionKey = strings.TrimSpace(cfg.EncryptionKey)
-	if cfg.EncryptionKey == "" {
-		return cfg, fmt.Errorf("ENCRYPTION_KEY is required in client config")
+	cfg.DomainKeyringFile = strings.TrimSpace(cfg.DomainKeyringFile)
+	if cfg.DomainKeyringFile == "" && cfg.EncryptionKey == "" {
+		return cfg, fmt.Errorf("ENCRYPTION_KEY is required in client config (or set DOMAIN_KEYRING_FILE)")
 	}
 
 	cfg.Domains = normalizeClientDomains(cfg.Domains)
@@ -476,13 +512,30 @@ func finalizeClientConfig(cfg ClientConfig) (ClientConfig, error) {
 	}
 
 	cfg.ResolversFilePath = strings.TrimSpace(cfg.ResolversFilePath)
+	cfg.ResolverRegistryFile = strings.TrimSpace(cfg.ResolverRegistryFile)
+	cfg.ScannerAddr = strings.TrimSpace(cfg.ScannerAddr)
+	if cfg.ScannerAddr == "" {
+		cfg.ScannerAddr = "127.0.0.1:18777"
+	}
+	cfg.ScannerInstanceID = strings.TrimSpace(cfg.ScannerInstanceID)
 
-	resolvers, resolverMap, err := LoadClientResolvers(cfg.ResolversPath())
+	// Scanner-owned inventory: the client must not load/scan the resolver source file
+	// as an input universe. It may still exist on disk, but runtime inventory comes
+	// from the local scanner service.
+	if cfg.ScannerEnabled {
+		cfg.Resolvers = nil
+		cfg.ResolverMap = map[string]int{}
+		cfg.ResolverFileStats = ResolverFileStats{}
+		return cfg, nil
+	}
+
+	resolvers, resolverMap, stats, err := LoadClientResolversWithStats(cfg.ResolversPath())
 	if err != nil {
 		return cfg, err
 	}
 	cfg.Resolvers = resolvers
 	cfg.ResolverMap = resolverMap
+	cfg.ResolverFileStats = stats
 	return cfg, nil
 }
 

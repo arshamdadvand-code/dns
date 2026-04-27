@@ -12,6 +12,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +43,7 @@ type Server struct {
 	cfg                      config.ServerConfig
 	log                      *logger.Logger
 	codec                    *security.Codec
+	codecByDomain            map[string]*security.Codec
 	domainMatcher            *domainMatcher.Matcher
 	sessions                 *sessionStore
 	deferredDNSSession       *deferredSessionProcessor
@@ -99,6 +101,7 @@ type postSessionValidation struct {
 }
 
 func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Server {
+	codecByDomain, _ := buildCodecByDomain(cfg.ConfigDir, cfg.DomainKeyringFile)
 	invalidCookieWindow := cfg.InvalidCookieWindow()
 	if invalidCookieWindow <= 0 {
 		invalidCookieWindow = 2 * time.Second
@@ -123,6 +126,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		cfg:                    cfg,
 		log:                    log,
 		codec:                  codec,
+		codecByDomain:          codecByDomain,
 		domainMatcher:          domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
 		sessions:               sessions,
 		deferredDNSSession:     newDeferredSessionProcessor(dnsDeferredWorkers, dnsDeferredQueue, log),
@@ -171,6 +175,19 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 			},
 		},
 	}
+}
+
+func (s *Server) codecForDomain(domain string) *security.Codec {
+	if s == nil {
+		return nil
+	}
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain != "" && s.codecByDomain != nil {
+		if c := s.codecByDomain[domain]; c != nil {
+			return c
+		}
+	}
+	return s.codec
 }
 
 type throttledLogState struct {

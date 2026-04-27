@@ -50,7 +50,8 @@ func (s *Server) handlePacket(packet []byte) []byte {
 }
 
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
-	vpnPacket, err := VpnProto.ParseInflatedFromLabels(decision.Labels, s.codec)
+	codec := s.codecForDomain(decision.BaseDomain)
+	vpnPacket, err := VpnProto.ParseInflatedFromLabels(decision.Labels, codec)
 	if err != nil {
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "vpn-proto-parse-failed")
 	}
