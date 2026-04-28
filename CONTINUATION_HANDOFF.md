@@ -109,7 +109,7 @@ Maximize **useful stable throughput** on a given network vantage with this DNS-t
 - inventory-first discovery (scanner service)
 - measurement-first derived runtime configuration (profiling)
 - history-backed runtime adaptation (controller)
-- multi-instance capacity (multiple domains+keys) for higher concurrency today, and optional true multi-lane aggregation later
+- multi-instance capacity (multiple domains+keys) for higher concurrency today, plus mandatory true multi-lane aggregation in the current execution phase
 - a single full-lifecycle fixed-layout TUI that shows truth, not scroll logs
 
 ### 2.1.1 Non-Negotiable Ownership Boundaries
@@ -203,27 +203,195 @@ Runtime sends "need" signals, never "how":
 
 Scanner decides the inventory actions (replenish/expand/refresh).
 
-### 2.1.4 How Multi-Instance Helps Speed (Now vs Later)
+### 2.1.4 How Multi-Instance Helps Speed (Current Phase Deliverables)
 
-We intentionally separate two concepts:
+We intentionally separate two complementary implementation tracks that are both mandatory in this phase:
 
-1. **Concurrency scaling (now, cheap):** per-connection routing across instances
-2. **Single-flow max speed (later, expensive):** true multi-lane striping + reassembly
+1. **Concurrency scaling (mandatory now):** per-connection routing across instances
+2. **Single-flow max speed (mandatory now):** true multi-lane striping + reassembly
 
-**Now (target for next 2-3 iterations): single-process multi-instance hub**
+**Current-phase track A (mandatory): single-process multi-instance hub**
 
-- one client process hosts N logical instances (3 now, scalable to 4/5/10 later)
+- one client process hosts N logical instances (3 now, scalable to 4/5/10)
 - one SOCKS entrypoint routes each inbound TCP connection to exactly one instance (sticky)
 - result: Telegram + Web (multiple connections) do not collapse on one instance
-- no byte-level striping in this phase
+- this track co-exists with multi-lane implementation work in the same iteration
 
-This is the pragmatic fastest path to an operational product while keeping the architecture ready for later aggregation.
+This is the pragmatic path to an operational product while delivering full aggregation capabilities in the same execution phase.
 
-**Later (optional): multi-lane aggregated data plane**
+**Current-phase track B (mandatory): multi-lane aggregated data plane**
 
 - aggregate session id + control lane + data lanes
 - chunking + global sequence + reassembly + weighted scheduler
-- only required if single-flow throughput is the bottleneck after the "now" phase is stable
+- required deliverable in this iteration to maximize single-flow throughput
+
+Deferral of true multi-lane striping + reassembly to any future phase is explicitly prohibited.
+
+### 2.1.4.1 Execution Scope (Current Phase, Mandatory)
+
+The following implementation items are mandatory deliverables for this iteration:
+
+- lane scheduler (weighted/dynamic)
+- chunking + global sequence numbering
+- per-lane ACK/timeout policy
+- reorder buffer + reassembly window
+- loss/duplicate handling
+- flow-control/backpressure between lanes
+- lane health scoring + lane demotion/promotion
+- fail-safe fallback to single-lane in critical conditions
+
+### 2.1.4.2 Slipgate-inspired mechanisms to implement now
+
+Any useful mechanism proposed in recent chats that materially improves speed or stability must be implemented in this phase, not moved to backlog.
+
+Tracking format is mandatory for each mechanism:
+
+- **owner:** directly responsible engineer/agent
+- **artifact:** concrete output (design doc, code path, metrics file, or test report)
+- **acceptance signal:** observable pass condition in runtime evidence
+
+Execution table (must be maintained during implementation):
+
+- **Mechanism: adaptive lane scheduler policy tuning**
+  - owner + artifact + acceptance signal
+- **Mechanism: robust chunk integrity and reassembly guardrails**
+  - owner + artifact + acceptance signal
+- **Mechanism: lane health-driven traffic redistribution**
+  - owner + artifact + acceptance signal
+- **Mechanism: duplicate suppression and loss recovery hardening**
+  - owner + artifact + acceptance signal
+- **Mechanism: overload backpressure coordination across lanes**
+  - owner + artifact + acceptance signal
+
+### 2.1.4.3 Multi-Lane Aggregated Data Plane Spec (v0, Mandatory Now)
+
+This is the bounded "make it work for speed" aggregate transport spec for the current execution phase.
+
+#### Goal
+
+For a **single meaningful flow** (large/sustained TCP stream), achieve higher useful stable throughput by using up to:
+
+- 1 control lane
+- + 1..2 data lanes
+
+backed by **different real instances** (`domain + key`) under the same client process and the same server process.
+
+#### Constraints (current phase)
+
+- DNS transport remains UDP-to-resolvers (no DNS-over-TCP work in this phase).
+- Maximum 3 total lanes for first working implementation (scalable later).
+- Must activate only when helpful (avoid overhead for tiny flows).
+- Must survive one lane degrading/dying without killing the entire logical stream.
+- Must not break the scanner ownership boundary (client consumes lanes; scanner discovers/maintains).
+
+#### Concepts
+
+**Aggregate session**
+
+- `aggregate_session_id`: random 64-bit or 128-bit id generated by the client control lane.
+- Server maintains a per-aggregate-session state that owns:
+  - upstream TCP connection(s) to the requested target
+  - per-flow reassembly state
+  - lane membership and health summaries
+
+**Lane**
+
+Each lane is a real MasterDnsVPN session under one instance (domain+key), bound to one resolver endpoint.
+
+Lane identity fields:
+
+- `lane_id`
+- `instance_id` (domain)
+- `key_fingerprint`
+- resolver endpoint used
+- lane state: `warming | active | degraded | draining | dropped | replacement_pending`
+
+#### Control lane vs data lanes
+
+**Control lane responsibilities**
+
+- create aggregate session on server
+- authorize/join additional lanes (join token)
+- carry control messages (acks, join/leave, keepalive, stats)
+- be the "source of truth" for aggregate membership
+
+**Data lane responsibilities**
+
+- carry chunk payloads
+- report minimal lane health (delivery timing, failure class)
+
+#### Activation gate (avoid overhead for tiny flows)
+
+Aggregation activates only when flow is likely to benefit. Minimum required triggers (one is enough):
+
+- backlog exceeds a meaningful threshold (bytes pending in send buffer)
+- flow remains active beyond a minimum time window
+- single-lane sustained bottleneck observed (throughput below potential while app demand continues)
+
+Default: tiny short flows stay single-lane.
+
+#### Data model: chunking + global sequencing
+
+Outgoing byte stream is segmented into chunks.
+
+Each chunk carries:
+
+- `aggregate_session_id`
+- `flow_id` (stable id for the TCP stream within the aggregate session)
+- `offset` (monotonic stream offset)
+- `length`
+- `generation` (retransmit generation)
+- payload bytes
+
+The global stream position (`offset`) is mandatory to support out-of-order arrival.
+
+#### Receiver-side reassembly (mandatory)
+
+Receiver (server for client->server direction, client for server->client direction) must:
+
+- accept out-of-order chunks
+- store in reorder buffer keyed by `offset`
+- deliver only contiguous in-order bytes to the upper stream
+- track gaps (missing offsets)
+- bound memory via window limits and eviction rules
+
+#### Retransmit / reassign (bounded, lane-aware)
+
+If a chunk is missing/stalled beyond a bounded timeout:
+
+- reassign it to a healthier lane (do not wait forever on a dead lane)
+- increment `generation`
+- cap duplicates to avoid storms
+
+Lane death must not permanently stall forward progress.
+
+#### Weighted scheduler (no equal split)
+
+Scheduler assigns chunks to lanes using weights derived from live lane signals:
+
+- recent delivered useful bytes / second (lane contribution)
+- tail RTT inflation (p90 vs rolling best)
+- timeout/failure pressure (quality decay)
+- carrier incompatibility pressure (REFUSED/SERVFAIL: remove, don't "tune")
+- outstanding in-flight bytes per lane (avoid queue bloat)
+
+Weights change gradually and new lanes start with low weight (warming).
+
+#### Failure classes (must remain separated)
+
+- `REFUSED`/`SERVFAIL`: carrier/path incompatibility
+  - remove from candidate set for that instance; do not attempt to "fix" via targets/dup
+- `timeout`/RTT inflation/streaks: quality decay
+  - lane weight reduced, potential demote/drain, reassign missing chunks
+
+#### Evidence artifacts (required for "done")
+
+For a bounded real run, persist:
+
+- `striping_metrics_*.json`: lane contributions, weights over time, retransmit counts, reorder depth, goodput vs wire
+- `reassembly_integrity_*.json`: checksum/byte-count proof that reassembly is correct under out-of-order arrival
+
+The feature must not be claimed "done" without these artifacts.
 
 ### 2.1.5 Configuration Philosophy (Minimal Bootstrap, Max Derivation)
 
@@ -251,6 +419,8 @@ This is the pragmatic fastest path to an operational product while keeping the a
 
 - DNS transport is UDP-to-resolver (not TCP) in this codebase
 - tunnel framing / packet types / codec
+- TCP tunneling/outbound mode is out of scope for this phase
+- current-phase focus is exclusively UDP DNS data-plane + multi-lane over the existing protocol
 
 Note: a formal parameter audit against the official legacy `client_config.toml` is still pending (user will provide).
 
@@ -811,7 +981,7 @@ This section is intentionally blunt.
 - scanner/client lifecycle resilience from the current exact snapshot
 - full runtime adaptation path coverage under production-like load
 
-### Not implemented as a real finished feature
+### Mandatory in current iteration (implementation required now)
 
 - true multi-instance aggregated speed data plane
 - aggregate session identity across instance lanes
@@ -955,17 +1125,17 @@ This is single-domain-oriented evidence, not multi-instance evidence.
 
 ## 8. What Is Missing To Reach the Intended Final Goal
 
-Near-term product target (finishable in 2-3 iterations):
+Current-iteration product target (mandatory):
 
 - one client process hosts 3 logical instances (domain+key isolated)
 - scanner supplies per-instance warm/ready inventory and replenishes on demand
-- client routes each inbound SOCKS TCP stream to exactly one chosen instance (HAProxy-style routing; no byte-level striping in this phase)
+- client routes each inbound SOCKS TCP stream to exactly one chosen instance (HAProxy-style routing) while multi-lane striping/reassembly is implemented in parallel in the same iteration
 - runtime adaptation keeps each instance near its best stable operating point
 - one unified console UI shows per-instance throughput/health and scanner state
 
-Longer-term optional target (only if single-flow speed is still insufficient):
+Same-iteration mandatory target:
 
-- true multi-lane aggregated transport (striping + reassembly across instances)
+- true multi-lane aggregated transport (striping + reassembly across instances) as part of this iteration's deliverables
 
 ### Missing technical blocks (as of this checkout)
 
@@ -1013,11 +1183,7 @@ Iteration 3 (operability): unified UI + proof run
   - resolver counts and health (green->red spectrum)
   - scanner status (idle/scanning) + inventory counts per instance
   - derived runtime knobs per instance
-- run a bounded real-traffic proof session and capture the regenerated evidence artifacts
-
-Deferred (only if needed for single-flow max speed):
-
-- multi-lane aggregated transport (striping + reassembly)
+- run a bounded real-traffic proof session and capture the regenerated evidence artifacts, including multi-lane striping/reassembly evidence
 
 ## 10. Practical Risks and Landmines
 
@@ -1130,10 +1296,44 @@ In short:
 - scanner separation was implemented architecturally
 - multi-domain/multi-key serving was implemented on server and client
 - scanner parity was previously broken; parity logic is now restored in code via `InventoryProber` (still needs fresh proof run)
-- true multi-lane aggregated speed transport is not implemented and is intentionally deferred for now
+- true multi-lane aggregated speed transport is a mandatory deliverable in the current execution phase and must be implemented now
 
 Any continuation effort should treat these as the primary continuation boundary:
 
 1. prove scanner parity + 3-instance ready pools
 2. ship single-process 3-instance client + HAProxy-style per-connection routing + unified UI
-3. only then consider multi-lane striping if single-flow throughput is still insufficient
+3. implement and validate multi-lane striping/reassembly within this same execution phase; do not postpone
+
+## 13. Immediate Acceptance Criteria (Current Iteration)
+
+The current iteration is accepted only when all criteria below are met with concrete artifacts.
+
+### 13.1 Single-flow throughput success criteria
+
+- single-flow throughput with multi-lane striping enabled must exceed single-lane baseline by an agreed measurable margin in repeated runs
+- throughput gain must be reported for both median and sustained window measurements (not one-shot peak)
+- evidence artifact: `striping_metrics_*.json`
+
+### 13.2 Stability criteria (tail latency, loss tolerance, reorder tolerance)
+
+- tail latency (`p95`/`p99`) must stay inside defined operational bounds under normal loss/reorder conditions
+- controlled packet loss injection must show graceful degradation without session collapse
+- reorder tolerance must be demonstrated by successful reassembly integrity under out-of-order delivery pressure
+- evidence artifacts:
+  - `striping_metrics_*.json`
+  - `reassembly_integrity_*.json`
+
+### 13.3 Degrade-safe behavior criteria
+
+- lane health degradation must trigger deterministic demotion/promotion behavior
+- critical instability must trigger fail-safe fallback to single-lane mode without hard traffic break
+- recovery from fail-safe fallback must preserve correctness and return to multi-lane only when health criteria are satisfied
+- evidence artifact: `lane_health_summary_*.json`
+
+### 13.4 Required evidence package (artifact names)
+
+- `striping_metrics_*.json`
+- `reassembly_integrity_*.json`
+- `lane_health_summary_*.json`
+
+Absence of this evidence package means the iteration is not accepted.

@@ -402,8 +402,11 @@ func (c *Client) overrideConnectionsFromScanner(activeByDomain map[string][]conf
 	c.balancer.SetConnections(pointers)
 
 	for _, conn := range connections {
-		c.balancer.SetConnectionValidity(conn.Key, true)
-		if _, ok := activeKeys[conn.Key]; !ok {
+		// Active-ready becomes Balancer active; reserve-ready stays inactive until promoted.
+		if _, ok := activeKeys[conn.Key]; ok {
+			c.balancer.SetConnectionValidity(conn.Key, true)
+		} else {
+			// Leave inactive; seed conservative stats so initial selection penalizes it if it becomes active later.
 			c.balancer.SeedConservativeStats(conn.Key)
 		}
 	}
