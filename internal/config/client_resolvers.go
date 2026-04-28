@@ -173,6 +173,12 @@ func isHardInvalidResolverAddr(addr netip.Addr) bool {
 	if addr.IsLoopback() || addr.IsMulticast() || addr.IsUnspecified() {
 		return true
 	}
+	// Hard-invalid scope: resolver endpoints must be routable from the current
+	// vantage. RFC1918/ULA/link-local are never valid public resolvers and only
+	// waste scanner/runtime attempts.
+	if addr.IsPrivate() || addr.IsLinkLocalUnicast() {
+		return true
+	}
 	if addr.Is4() {
 		v4 := addr.As4()
 		if v4[0] == 255 && v4[1] == 255 && v4[2] == 255 && v4[3] == 255 {

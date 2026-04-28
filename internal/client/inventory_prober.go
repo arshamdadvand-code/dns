@@ -14,6 +14,7 @@ import (
 type InventoryProber struct {
 	domain string
 	c      *Client
+	s0     *Stage0Prober
 }
 
 func NewInventoryProber(domain string, encryptionMethod int, rawKey string) (*InventoryProber, error) {
@@ -32,9 +33,15 @@ func NewInventoryProber(domain string, encryptionMethod int, rawKey string) (*In
 	c.codec = codec
 	c.udpBufferPool.New = func() any { return make([]byte, RuntimeUDPReadBufferSize) }
 
+	s0, err := NewStage0Prober(domain, encryptionMethod, rawKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return &InventoryProber{
 		domain: domain,
 		c:      c,
+		s0:     s0,
 	}, nil
 }
 
@@ -52,6 +59,15 @@ func (p *InventoryProber) Profile(ctx context.Context, ip string, port int, time
 }
 
 func (p *InventoryProber) ProfileResult(ctx context.Context, ip string, port int, timeout time.Duration) (Stage0ProbeResult, *profiling.ResolverProfile, error) {
+	// Preserve Stage0 diagnostic detail. This is especially important for the
+	// scanner service so it can classify failures (NXDOMAIN/SERVFAIL/shape).
+	if p != nil && p.s0 != nil {
+		s0, _ := p.s0.Probe(ctx, ip, port, timeout)
+		if !s0.OK {
+			return s0, nil, nil
+		}
+	}
+
 	profile, err := p.Profile(ctx, ip, port, timeout)
 	if err != nil {
 		return Stage0ProbeResult{OK: false, FailReason: "PROFILE_ERR"}, nil, err

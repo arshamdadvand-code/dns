@@ -32,17 +32,15 @@ func TestLoadClientResolversSupportsIPCIDRAndPort(t *testing.T) {
 		t.Fatalf("LoadClientResolvers returned error: %v", err)
 	}
 
-	if len(resolvers) != 5 {
-		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 5)
+	// RFC1918 and link-local ranges are treated as hard-invalid resolver endpoints.
+	if len(resolvers) != 3 {
+		t.Fatalf("unexpected resolver count: got=%d want=%d", len(resolvers), 3)
 	}
 	if resolverMap["8.8.8.8"] != 53 {
 		t.Fatalf("unexpected default port: got=%d want=%d", resolverMap["8.8.8.8"], 53)
 	}
 	if resolverMap["1.1.1.1"] != 5353 {
 		t.Fatalf("unexpected custom port: got=%d want=%d", resolverMap["1.1.1.1"], 5353)
-	}
-	if resolverMap["192.168.10.1"] != 5300 || resolverMap["192.168.10.2"] != 5300 {
-		t.Fatalf("unexpected cidr expansion map: %+v", resolverMap)
 	}
 	if resolverMap["2001:db8::1"] != 5400 {
 		t.Fatalf("unexpected IPv6 port: got=%d want=%d", resolverMap["2001:db8::1"], 5400)

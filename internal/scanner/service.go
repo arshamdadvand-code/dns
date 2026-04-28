@@ -745,7 +745,10 @@ func (s *Service) probeOne(ctx context.Context, instanceID string, ep Endpoint) 
 	if p == nil {
 		return
 	}
-	res, prof, err := p.ProfileResult(ctx, ep.IP, ep.Port, 2*time.Second)
+	// Scanner probing is inventory-first and often operates in sparse environments.
+	// A slightly longer timeout improves parity with real-world conditions and
+	// reduces false negatives during cold-start.
+	res, prof, err := p.ProfileResult(ctx, ep.IP, ep.Port, 4*time.Second)
 	_ = err
 	now := time.Now()
 

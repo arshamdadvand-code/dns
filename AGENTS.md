@@ -38,35 +38,20 @@
 
 ## Current Project Targets
 
-- User domain target: `c.ad11.eu.cc`
-- Delegation records claimed by user:
-  - `A ns -> 45.38.249.148`
-  - `NS c -> ns.ad11.eu.cc`
-
-## Current Deployment State
-
-- Server directory on the remote host:
-  - `/opt/masterdnsvpn/c.ad11.eu.cc`
-- Server binary:
-  - `/opt/masterdnsvpn/c.ad11.eu.cc/masterdnsvpn-server`
-- Server config:
-  - `/opt/masterdnsvpn/c.ad11.eu.cc/server_config.toml`
-- Server key file:
-  - `/opt/masterdnsvpn/c.ad11.eu.cc/encrypt_key.txt`
-- systemd unit:
-  - `masterdnsvpn-c.ad11.eu.cc.service`
-- Current server status:
-  - active and running on the remote host
+- Active logical instances (domains):
+  - `1.7a8.ir`
+  - `0.7x0.ir`
+  - `2.a5t.ir`
 
 ## Current Client State
 
-- Local client config is updated to:
-  - `DOMAINS = ["c.ad11.eu.cc"]`
-  - matching `ENCRYPTION_KEY`
+- Mainline mode is scanner-first (inventory owned by scanner).
+- Local client config uses:
+  - `DOMAINS = ["1.7a8.ir", "0.7x0.ir", "2.a5t.ir"]`
   - `LISTEN_IP = "127.0.0.1"`
+  - `LISTEN_PORT = 18000`
   - `LOCAL_DNS_ENABLED = false`
-- Local client runtime was started once and reached resolver testing.
-- One resolver was accepted during MTU testing, so the server/client pair is exchanging real tunnel setup traffic.
+  - `SCANNER_ENABLED = true`
 
 ## Client Defaults Worth Remembering
 
