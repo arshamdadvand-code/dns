@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-29T15:51:52.609773-07:00",
+  "generated_at": "2026-04-29T15:52:02.6098665-07:00",
   "domain": "0.7x0.ir",
   "striping_enabled": true,
   "domains_configured": 3,
@@ -34,8 +34,8 @@
     "2.188.167.14|53|2.a5t.ir"
   ],
   "telemetry": {
-    "generated_at": "2026-04-29T15:51:52.609773-07:00",
-    "elapsed_seconds": 5184.7466828,
+    "generated_at": "2026-04-29T15:52:02.6098665-07:00",
+    "elapsed_seconds": 5194.7467763,
     "wire_bytes_tx": 158734,
     "wire_bytes_rx": 227214,
     "useful_ingress_tx": 1091,
@@ -401,7 +401,7 @@
     "duplication_setup": 4,
     "failover_threshold": 5,
     "failover_cooldown_seconds": 15,
-    "active_set_health": 0.4500000000000001,
+    "active_set_health": 0.4892857142857144,
     "throughput_efficiency": 0,
     "target_pressure_down": true,
     "target_pressure_up": false,
@@ -412,7 +412,7 @@
     "tail_inflation": 1
   },
   "striping_metrics": {
-    "generated_at": "2026-04-29T15:51:52.609773-07:00",
+    "generated_at": "2026-04-29T15:52:02.6098665-07:00",
     "streams": {}
   }
 }
