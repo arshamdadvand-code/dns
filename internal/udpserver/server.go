@@ -101,7 +101,10 @@ type postSessionValidation struct {
 }
 
 func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Server {
-	codecByDomain, _ := buildCodecByDomain(cfg.ConfigDir, cfg.DomainKeyringFile)
+	codecByDomain, err := buildCodecByDomain(cfg.ConfigDir, cfg.DomainKeyringFile)
+	if err != nil && log != nil {
+		log.Warnf("domain keyring load warning: %v", err)
+	}
 	invalidCookieWindow := cfg.InvalidCookieWindow()
 	if invalidCookieWindow <= 0 {
 		invalidCookieWindow = 2 * time.Second

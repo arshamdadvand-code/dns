@@ -197,12 +197,26 @@ func (c *Client) connectOrSpawnScanner(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	// High-concurrency cold-start is required for practical inventory build speed.
+	// Keep these values aligned with scanner flags in cmd/scanner/main.go.
+	const (
+		scannerConcBase      = 1000
+		scannerConcOverlay   = 128
+		scannerConcReplenish = 500
+		scannerConcExpand    = 1000
+		scannerConcMaint     = 32
+	)
 	args := []string{
 		"-listen", c.scannerAddr,
 		"-store", filepath.Join(c.cfg.ConfigDir, "scanner_store.json"),
 		"-manifest", filepath.Join(c.cfg.ConfigDir, "scanner_instances.json"),
 		"-keys", filepath.Join(c.cfg.ConfigDir, "scanner_keys.json"),
 		"-feed", filepath.Join(c.cfg.ConfigDir, "scanner_feed.txt"),
+		"-conc-base", fmt.Sprintf("%d", scannerConcBase),
+		"-conc-overlay", fmt.Sprintf("%d", scannerConcOverlay),
+		"-conc-replenish", fmt.Sprintf("%d", scannerConcReplenish),
+		"-conc-expand", fmt.Sprintf("%d", scannerConcExpand),
+		"-conc-maint", fmt.Sprintf("%d", scannerConcMaint),
 	}
 	cmd := exec.Command(exePath, args...)
 	cmd.Stdout = nil

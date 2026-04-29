@@ -2,6 +2,7 @@ package udpserver
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,7 +51,7 @@ func loadDomainKeyring(configDir string, path string) ([]domainKeyringEntry, str
 }
 
 func buildCodecByDomain(configDir string, keyringPath string) (map[string]*security.Codec, error) {
-	entries, _, err := loadDomainKeyring(configDir, keyringPath)
+	entries, abs, err := loadDomainKeyring(configDir, keyringPath)
 	if err != nil {
 		return nil, err
 	}
@@ -58,6 +59,8 @@ func buildCodecByDomain(configDir string, keyringPath string) (map[string]*secur
 		return nil, nil
 	}
 	out := make(map[string]*security.Codec, len(entries))
+	var firstErr error
+	errCount := 0
 	for _, e := range entries {
 		if e.Domain == "" {
 			continue
@@ -70,7 +73,11 @@ func buildCodecByDomain(configDir string, keyringPath string) (map[string]*secur
 			}
 			b, err := os.ReadFile(p)
 			if err != nil {
-				return nil, err
+				if firstErr == nil {
+					firstErr = fmt.Errorf("read key_file failed for domain=%s path=%s: %w", e.Domain, p, err)
+				}
+				errCount++
+				continue
 			}
 			rawKey = strings.TrimSpace(string(b))
 		}
@@ -79,12 +86,22 @@ func buildCodecByDomain(configDir string, keyringPath string) (map[string]*secur
 		}
 		codec, err := security.NewCodec(e.EncryptionMethod, rawKey)
 		if err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = fmt.Errorf("codec init failed for domain=%s: %w", e.Domain, err)
+			}
+			errCount++
+			continue
 		}
 		out[e.Domain] = codec
 	}
 	if len(out) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
 		return nil, nil
+	}
+	if errCount > 0 {
+		return out, fmt.Errorf("domain keyring partially loaded: errors=%d first=%v keyring=%s", errCount, firstErr, abs)
 	}
 	return out, nil
 }
