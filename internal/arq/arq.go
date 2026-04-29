@@ -1589,6 +1589,12 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 	}
 
 	_, exists := a.rcvBuf[sn]
+	if exists && a.telemetry != nil {
+		a.telemetry.NoteReassemblyDuplicate()
+	}
+	if !exists && diff > 0 && diff < 32768 && a.telemetry != nil {
+		a.telemetry.NoteReassemblyOutOfOrder(int(diff))
+	}
 	if !exists && len(a.rcvBuf) >= a.receiveWindowSize && sn != a.rcvNxt {
 		a.mu.Unlock()
 		return
@@ -1692,6 +1698,7 @@ func (a *ARQ) writeLoop() {
 			}
 
 			// Coalesce contiguous chunks into a single write to reduce syscalls.
+			chunkCount := len(toWrite)
 			if len(toWrite) > 1 {
 				totalSize := 0
 				for _, chunk := range toWrite {
@@ -1714,6 +1721,9 @@ func (a *ARQ) writeLoop() {
 				}
 				toWrite = toWrite[:1]
 				toWrite[0] = merged
+			}
+			if a.telemetry != nil && chunkCount > 0 {
+				a.telemetry.NoteReassemblyDeliveredChunks(chunkCount)
 			}
 
 			shouldExit := false

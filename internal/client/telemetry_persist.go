@@ -12,6 +12,9 @@ import (
 type persistedTelemetrySummary struct {
 	GeneratedAt string `json:"generated_at"`
 	Domain      string `json:"domain"`
+	StripingEnabled bool `json:"striping_enabled"`
+	DomainCount int `json:"domains_configured"`
+	CodecDomainCount int `json:"codec_domains_loaded"`
 
 	// Runtime knobs at the time of persistence.
 	UploadMTU      int     `json:"synced_upload_mtu"`
@@ -64,6 +67,14 @@ func (c *Client) PersistTelemetrySummary(outPath string) (string, error) {
 	sum := persistedTelemetrySummary{
 		GeneratedAt: time.Now().Format(time.RFC3339Nano),
 		Domain:      domain,
+		StripingEnabled: c.stripingEnabled(),
+		DomainCount: len(c.cfg.Domains),
+		CodecDomainCount: func() int {
+			if c.codecByDomain == nil {
+				return 0
+			}
+			return len(c.codecByDomain)
+		}(),
 		UploadMTU:      c.syncedUploadMTU,
 		DownloadMTU:    c.syncedDownloadMTU,
 		PacketDup:      c.cfg.PacketDuplicationCount,
@@ -183,17 +194,31 @@ func (c *Client) persistEvidenceLive(stripingPath string, laneHealthPath string,
 		"adaptation":   c.runtimeControllerSnapshot(),
 	})
 
-	_ = writeJSON(reassemblyPath, map[string]any{
-		"generated_at": time.Now().Format(time.RFC3339Nano),
-		"domain":       func() string { if len(c.cfg.Domains) > 0 { return c.cfg.Domains[0] }; return "" }(),
-		"useful_delivered_rx": func() uint64 {
-			if c.telemetry == nil {
-				return 0
-			}
-			return c.telemetry.Snapshot().UsefulDeliveredRX
-		}(),
-		"note": "placeholder until ARQ reorder/gap counters are instrumented",
-	})
+	_ = writeJSON(reassemblyPath, c.reassemblyEvidence(func() string {
+		if len(c.cfg.Domains) > 0 {
+			return c.cfg.Domains[0]
+		}
+		return ""
+	}()))
 
 	return nil
+}
+
+func (c *Client) reassemblyEvidence(domain string) map[string]any {
+	snap := map[string]any{
+		"generated_at": time.Now().Format(time.RFC3339Nano),
+		"domain":       domain,
+	}
+	if c == nil || c.telemetry == nil {
+		snap["available"] = false
+		return snap
+	}
+	tel := c.telemetry.Snapshot()
+	snap["available"] = true
+	snap["useful_delivered_rx"] = tel.UsefulDeliveredRX
+	snap["out_of_order_events"] = tel.ReassemblyOutOfOrder
+	snap["duplicate_events"] = tel.ReassemblyDuplicates
+	snap["delivered_ops"] = tel.ReassemblyDeliveredOps
+	snap["max_gap"] = tel.ReassemblyMaxGap
+	return snap
 }

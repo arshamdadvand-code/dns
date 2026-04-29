@@ -38,7 +38,11 @@ func (c *Client) buildTunnelTXTQueryRaw(domain string, options VpnProto.BuildOpt
 	if err != nil {
 		return nil, err
 	}
-	encoded, err := c.codec.EncryptAndEncodeBytes(raw)
+	codec := c.codecForDomain(domain)
+	if codec == nil {
+		return nil, VpnProto.ErrCodecUnavailable
+	}
+	encoded, err := codec.EncryptAndEncodeBytes(raw)
 	if err != nil {
 		return nil, err
 	}

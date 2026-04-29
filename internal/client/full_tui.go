@@ -307,10 +307,11 @@ func (ui *fullTUI) render() {
 		}
 
 		ui.throughput.SetText(fmt.Sprintf(
-			"tx_ingress=%s\ntx_acked=%s\nrx_delivered=%s\nwire_tx=%s\nwire_rx=%s\ntx_eff=%.3f  rx_eff=%.3f\n",
+			"tx_ingress=%s\ntx_acked=%s\nrx_delivered=%s\nwire_tx=%s\nwire_rx=%s\ntx_eff=%.3f  rx_eff=%.3f\nreorder=%d  dup=%d  max_gap=%d\n",
 			formatBpsCompact(ing), formatBpsCompact(ack), formatBpsCompact(del),
 			formatBpsCompact(wtx), formatBpsCompact(wrx),
 			txEff, rxEff,
+			tel.ReassemblyOutOfOrder, tel.ReassemblyDuplicates, tel.ReassemblyMaxGap,
 		))
 	}
 

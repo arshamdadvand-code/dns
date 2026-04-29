@@ -16,6 +16,9 @@ type Sink interface {
 	AddUsefulIngressTX(n int)
 	AddUsefulAckedTX(n int)
 	AddUsefulDeliveredRX(n int)
+	NoteReassemblyOutOfOrder(gap int)
+	NoteReassemblyDuplicate()
+	NoteReassemblyDeliveredChunks(n int)
 }
 
 type RuntimeTelemetry struct {
@@ -28,6 +31,11 @@ type RuntimeTelemetry struct {
 	usefulIngressTX  atomic.Uint64 // bytes read from local app socket into ARQ
 	usefulAckedTX    atomic.Uint64 // bytes ACKed by peer (STREAM_DATA_ACK)
 	usefulDeliveredRX atomic.Uint64 // bytes written to local app socket
+
+	reassemblyOutOfOrder   atomic.Uint64
+	reassemblyDuplicates   atomic.Uint64
+	reassemblyDeliveredOps atomic.Uint64
+	reassemblyMaxGap       atomic.Uint64
 
 	// Duplication overhead baseline inputs (since start).
 	logicalPackets atomic.Uint64 // planner tasks processed
@@ -103,8 +111,6 @@ func (t *RuntimeTelemetry) AddWireRXForResolver(key string, n int) {
 		return
 	}
 	t.AddWireRX(n)
-	s := t.ensureResolver(key)
-	_ = s
 }
 
 func (t *RuntimeTelemetry) AddUsefulIngressTX(n int) {
@@ -123,6 +129,36 @@ func (t *RuntimeTelemetry) AddUsefulDeliveredRX(n int) {
 	if n > 0 {
 		t.usefulDeliveredRX.Add(uint64(n))
 	}
+}
+
+func (t *RuntimeTelemetry) NoteReassemblyOutOfOrder(gap int) {
+	if t == nil || gap <= 0 {
+		return
+	}
+	t.reassemblyOutOfOrder.Add(1)
+	for {
+		prev := t.reassemblyMaxGap.Load()
+		if uint64(gap) <= prev {
+			return
+		}
+		if t.reassemblyMaxGap.CompareAndSwap(prev, uint64(gap)) {
+			return
+		}
+	}
+}
+
+func (t *RuntimeTelemetry) NoteReassemblyDuplicate() {
+	if t == nil {
+		return
+	}
+	t.reassemblyDuplicates.Add(1)
+}
+
+func (t *RuntimeTelemetry) NoteReassemblyDeliveredChunks(n int) {
+	if t == nil || n <= 0 {
+		return
+	}
+	t.reassemblyDeliveredOps.Add(uint64(n))
 }
 
 func (t *RuntimeTelemetry) NoteTunnelOK(key string, rtt time.Duration) {
@@ -208,6 +244,10 @@ type Snapshot struct {
 	UsefulIngressTX   uint64 `json:"useful_ingress_tx"`
 	UsefulAckedTX     uint64 `json:"useful_acked_tx"`
 	UsefulDeliveredRX uint64 `json:"useful_delivered_rx"`
+	ReassemblyOutOfOrder uint64 `json:"reassembly_out_of_order"`
+	ReassemblyDuplicates uint64 `json:"reassembly_duplicates"`
+	ReassemblyDeliveredOps uint64 `json:"reassembly_delivered_ops"`
+	ReassemblyMaxGap uint64 `json:"reassembly_max_gap"`
 
 	LogicalPackets    uint64 `json:"logical_packets"`
 	TargetsRequested  uint64 `json:"targets_requested"`
@@ -226,6 +266,10 @@ func (t *RuntimeTelemetry) Snapshot() Snapshot {
 		UsefulIngressTX:   t.usefulIngressTX.Load(),
 		UsefulAckedTX:     t.usefulAckedTX.Load(),
 		UsefulDeliveredRX: t.usefulDeliveredRX.Load(),
+		ReassemblyOutOfOrder: t.reassemblyOutOfOrder.Load(),
+		ReassemblyDuplicates: t.reassemblyDuplicates.Load(),
+		ReassemblyDeliveredOps: t.reassemblyDeliveredOps.Load(),
+		ReassemblyMaxGap: t.reassemblyMaxGap.Load(),
 		LogicalPackets:    t.logicalPackets.Load(),
 		TargetsRequested:  t.targetsRequested.Load(),
 		TargetsSelected:   t.targetsSelected.Load(),
@@ -285,4 +329,3 @@ func (t *RuntimeTelemetry) PersistJSON(outPath string) (string, error) {
 	}
 	return outPath, nil
 }
-

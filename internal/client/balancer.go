@@ -74,6 +74,7 @@ type balancerStreamRouteState struct {
 	LaneDeficit []float64
 	LaneWeight  []float64
 	LastLaneKey string
+	LaneRefreshedAt time.Time
 
 	// Lightweight distribution stats (evidence artifacts).
 	LaneSent map[string]uint64
@@ -122,6 +123,9 @@ type Balancer struct {
 	inactiveIDs  []int
 	stats        []*connectionStats
 	streamRoutes map[uint16]*balancerStreamRouteState
+	// recentStriping keeps recently-closed stream lane distributions so evidence
+	// does not vanish immediately when a stream is cleaned up.
+	recentStriping map[uint16]recentStripingEntry
 
 	pendingShards [resolverPendingShardCount]balancerPendingShard
 
@@ -132,6 +136,11 @@ type Balancer struct {
 	autoDisableTimeoutWindow time.Duration
 	onResolverDisabled       func(*Connection, string)
 	confirmResolverDown      func(*Connection, time.Duration) bool
+}
+
+type recentStripingEntry struct {
+	closedAt time.Time
+	lanes    map[string]uint64
 }
 
 // StripingSnapshot is a minimal evidence payload for "true multi-lane striping":
@@ -151,6 +160,21 @@ func (b *Balancer) StripingSnapshot() StripingSnapshot {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+
+	// Include recent closed streams for a bounded TTL so evidence doesn't disappear.
+	const ttl = 10 * time.Minute
+	now := time.Now()
+	for sid, rec := range b.recentStriping {
+		if rec.closedAt.IsZero() || now.Sub(rec.closedAt) > ttl || len(rec.lanes) == 0 {
+			continue
+		}
+		m := make(map[string]uint64, len(rec.lanes))
+		for k, v := range rec.lanes {
+			m[k] = v
+		}
+		out.Streams[sid] = m
+	}
+
 	for sid, st := range b.streamRoutes {
 		if st == nil {
 			continue
@@ -195,6 +219,7 @@ func NewBalancer(strategy int, log *logger.Logger) *Balancer {
 		strategy:                strategy,
 		log:                     log,
 		streamRoutes:            make(map[uint16]*balancerStreamRouteState),
+		recentStriping:          make(map[uint16]recentStripingEntry),
 		streamFailoverThreshold: 1,
 		streamFailoverCooldown:  time.Second,
 	}
@@ -985,6 +1010,20 @@ func (b *Balancer) CleanupStream(streamID uint16) {
 	}
 
 	b.mu.Lock()
+	if st := b.streamRoutes[streamID]; st != nil {
+		st.mu.Lock()
+		if len(st.LaneSent) > 0 {
+			cpy := make(map[string]uint64, len(st.LaneSent))
+			for k, v := range st.LaneSent {
+				cpy[k] = v
+			}
+			b.recentStriping[streamID] = recentStripingEntry{
+				closedAt: time.Now(),
+				lanes:    cpy,
+			}
+		}
+		st.mu.Unlock()
+	}
 	delete(b.streamRoutes, streamID)
 	b.mu.Unlock()
 }
@@ -1065,11 +1104,22 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	// Get the sticky preferred resolver for the main path
-	preferred, ok := b.selectPreferredConnectionForStreamLocked(packetType, state)
+	// Primary lane for the stream:
+	// For true striping, pick via striped lane scheduler (even when we also duplicate).
+	// This ensures single-flow traffic is distributed across multiple lanes over time.
+	preferred, ok := b.selectStripedLaneLocked(packetType, state)
 	if !ok {
-		return b.getUniqueConnectionsLocked(requiredCount), nil
+		// Fallback to legacy sticky preferred.
+		preferred, ok = b.selectPreferredConnectionForStreamLocked(packetType, state)
+		if !ok {
+			return b.getUniqueConnectionsLocked(requiredCount), nil
+		}
 	}
+	state.LastLaneKey = preferred.Key
+	if state.LaneSent == nil {
+		state.LaneSent = make(map[string]uint64)
+	}
+	state.LaneSent[preferred.Key]++
 
 	// Combine Preferred + Dynamic Others
 	selected := make([]Connection, 0, requiredCount)
@@ -1096,10 +1146,11 @@ func (b *Balancer) selectStripedLaneLocked(packetType uint8, state *balancerStre
 	}
 
 	// Initialize lane set lazily or refresh when it becomes invalid.
-	if len(state.LaneKeys) == 0 {
+	if b.shouldRefreshLaneSetLocked(state, 3) {
 		state.LaneKeys = b.selectInitialLaneSetLocked(3)
 		state.LaneDeficit = make([]float64, len(state.LaneKeys))
 		state.LaneWeight = make([]float64, len(state.LaneKeys))
+		state.LaneRefreshedAt = time.Now()
 	}
 
 	// Refresh weights from live signals (RTT/loss) cheaply.
@@ -1156,7 +1207,7 @@ func (b *Balancer) selectInitialLaneSetLocked(maxLanes int) []string {
 	}
 
 	// Start from the best pool selection per strategy, but cap and diversify.
-	pool := b.getUniqueConnectionsLocked(minI(len(b.activeIDs), maxLanes*2))
+	pool := b.getUniqueConnectionsLocked(len(b.activeIDs))
 	seenDomain := map[string]bool{}
 	var out []string
 	for _, c := range pool {
@@ -1188,6 +1239,59 @@ func (b *Balancer) selectInitialLaneSetLocked(maxLanes int) []string {
 	}
 
 	return out
+}
+
+func (b *Balancer) shouldRefreshLaneSetLocked(state *balancerStreamRouteState, maxLanes int) bool {
+	if b == nil || state == nil {
+		return false
+	}
+	target := minI(maxLanes, len(b.activeIDs))
+	if target <= 0 {
+		return false
+	}
+	if len(state.LaneKeys) == 0 || len(state.LaneKeys) != len(state.LaneDeficit) || len(state.LaneKeys) != len(state.LaneWeight) {
+		return true
+	}
+	if len(state.LaneKeys) < target {
+		return true
+	}
+
+	distinctActiveDomains := make(map[string]struct{}, maxLanes)
+	for _, idx := range b.activeIDs {
+		if idx < 0 || idx >= len(b.connections) {
+			continue
+		}
+		domain := b.connections[idx].Domain
+		if domain == "" {
+			domain = "default"
+		}
+		distinctActiveDomains[domain] = struct{}{}
+		if len(distinctActiveDomains) >= target {
+			break
+		}
+	}
+
+	distinctLaneDomains := make(map[string]struct{}, len(state.LaneKeys))
+	for _, key := range state.LaneKeys {
+		conn, ok := b.connectionByKeyLocked(key)
+		if !ok || conn == nil || !conn.IsValid || conn.Key == "" {
+			return true
+		}
+		domain := conn.Domain
+		if domain == "" {
+			domain = "default"
+		}
+		distinctLaneDomains[domain] = struct{}{}
+	}
+
+	if len(distinctLaneDomains) < minI(target, len(distinctActiveDomains)) {
+		return true
+	}
+
+	if state.LaneRefreshedAt.IsZero() {
+		return true
+	}
+	return time.Since(state.LaneRefreshedAt) > 10*time.Second
 }
 
 func (b *Balancer) estimateLaneWeightLocked(key string) float64 {

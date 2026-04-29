@@ -51,25 +51,12 @@ func (c *Client) PersistStripingArtifacts(outDir string) (stripingPath string, l
 	}
 
 	// 3) reassembly_integrity_*.json
-	// Note: true reassembly integrity (out-of-order/gap counters) should be sourced
-	// from ARQ-level instrumentation. For now we persist a minimal placeholder tied
-	// to delivered bytes counters so runs still produce a stable artifact.
+	// Reassembly integrity now comes from ARQ-level live counters.
 	reassemblyPath = filepath.Join(outDir, "reassembly_integrity"+safeDomain+"_"+ts+".json")
-	reassembly := map[string]any{
-		"generated_at": time.Now().Format(time.RFC3339Nano),
-		"domain":       domain,
-		"useful_delivered_rx": func() uint64 {
-			if c.telemetry == nil {
-				return 0
-			}
-			return c.telemetry.Snapshot().UsefulDeliveredRX
-		}(),
-		"note": "placeholder until ARQ reorder/gap counters are instrumented",
-	}
+	reassembly := c.reassemblyEvidence(domain)
 	if b, _ := json.MarshalIndent(reassembly, "", "  "); len(b) > 0 {
 		_ = os.WriteFile(reassemblyPath, b, 0o644)
 	}
 
 	return stripingPath, laneHealthPath, reassemblyPath, nil
 }
-

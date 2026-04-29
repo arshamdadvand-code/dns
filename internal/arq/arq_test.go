@@ -11,6 +11,7 @@ import (
 	"time"
 
 	Enums "masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/telemetry"
 )
 
 // MockPacketEnqueuer captures packets sent by ARQ
@@ -545,6 +546,55 @@ func TestARQ_ReceiveData(t *testing.T) {
 	}
 	if !bytes.Equal(buf[:n], testData) {
 		t.Errorf("expected data %s, got %s", string(testData), string(buf[:n]))
+	}
+}
+
+func TestARQ_ReassemblyTelemetryCapturesOutOfOrderAndDuplicate(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	tel := telemetry.NewRuntimeTelemetry()
+	cfg := Config{
+		WindowSize: 64,
+		RTO:        0.1,
+		MaxRTO:     0.5,
+		Telemetry:  tel,
+	}
+
+	localApp, arqConn := net.Pipe()
+	defer localApp.Close()
+	defer arqConn.Close()
+
+	a := NewARQ(1, 1, enqueuer, arqConn, 1000, &testLogger{t}, cfg)
+	a.Start()
+	defer a.Close("test end", CloseOptions{Force: true})
+
+	time.Sleep(50 * time.Millisecond)
+
+	a.ReceiveData(1, []byte("b"))
+	a.ReceiveData(1, []byte("b"))
+	a.ReceiveData(0, []byte("a"))
+
+	buf := make([]byte, 8)
+	_ = localApp.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	n, err := localApp.Read(buf)
+	if err != nil {
+		t.Fatalf("failed to read from local app: %v", err)
+	}
+	if got := string(buf[:n]); got != "ab" {
+		t.Fatalf("expected ordered delivery 'ab', got %q", got)
+	}
+
+	snap := tel.Snapshot()
+	if snap.ReassemblyOutOfOrder == 0 {
+		t.Fatal("expected out-of-order reassembly telemetry")
+	}
+	if snap.ReassemblyDuplicates == 0 {
+		t.Fatal("expected duplicate reassembly telemetry")
+	}
+	if snap.ReassemblyMaxGap == 0 {
+		t.Fatal("expected max reassembly gap to be tracked")
+	}
+	if snap.ReassemblyDeliveredOps == 0 {
+		t.Fatal("expected delivered chunk ops to be tracked")
 	}
 }
 

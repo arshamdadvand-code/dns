@@ -462,3 +462,44 @@ func TestBalancerSetConnectionMTUUpdatesBalancerOnly(t *testing.T) {
 		t.Fatalf("expected snapshot MTUs to update, got up=%d chars=%d down=%d", got.UploadMTUBytes, got.UploadMTUChars, got.DownloadMTUBytes)
 	}
 }
+
+func TestBalancerStripedLaneSetRefreshesForNewDomainDiversity(t *testing.T) {
+	b := NewBalancer(BalancingLeastLoss, nil)
+	connections := []*Connection{
+		{Key: "a", IsValid: true, Domain: "a.example"},
+		{Key: "b", IsValid: true, Domain: "b.example"},
+		{Key: "c", IsValid: true, Domain: "c.example"},
+	}
+	b.SetConnections(connections)
+	_ = b.SetConnectionValidity("a", true)
+	_ = b.SetConnectionValidity("b", true)
+	_ = b.SetConnectionValidity("c", true)
+
+	state := &balancerStreamRouteState{
+		LaneKeys:        []string{"a", "b"},
+		LaneDeficit:     []float64{0, 0},
+		LaneWeight:      []float64{1, 1},
+		LaneRefreshedAt: time.Now().Add(-11 * time.Second),
+		LaneSent:        map[string]uint64{},
+	}
+
+	b.mu.Lock()
+	_, ok := b.selectStripedLaneLocked(0, state)
+	b.mu.Unlock()
+	if !ok {
+		t.Fatal("expected striped lane selection to succeed")
+	}
+	if len(state.LaneKeys) != 3 {
+		t.Fatalf("expected lane set refresh to expand to 3 lanes, got %d", len(state.LaneKeys))
+	}
+	foundC := false
+	for _, key := range state.LaneKeys {
+		if key == "c" {
+			foundC = true
+			break
+		}
+	}
+	if !foundC {
+		t.Fatalf("expected refreshed lane set to include domain-diverse lane c, got %#v", state.LaneKeys)
+	}
+}
