@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -25,14 +26,24 @@ type persistedTelemetrySummary struct {
 
 	Telemetry  any                       `json:"telemetry"`
 	Adaptation runtimeControllerSnapshot `json:"runtime_adaptation"`
+	Striping   any                      `json:"striping_metrics,omitempty"`
 }
 
 func (c *Client) PersistTelemetrySummary(outPath string) (string, error) {
 	if c == nil || c.telemetry == nil {
 		return "", nil
 	}
+	domain := ""
+	if len(c.cfg.Domains) > 0 {
+		domain = c.cfg.Domains[0]
+	}
+	safeDomain := strings.NewReplacer(".", "_", ":", "_", "/", "_", "\\", "_").Replace(domain)
 	if outPath == "" {
-		outPath = filepath.Join(c.cfg.ConfigDir, "telemetry_summary_"+time.Now().Format("20060102_150405")+".json")
+		suffix := ""
+		if safeDomain != "" {
+			suffix = "_" + safeDomain
+		}
+		outPath = filepath.Join(c.cfg.ConfigDir, "telemetry_summary"+suffix+"_"+time.Now().Format("20060102_150405")+".json")
 	}
 
 	active := c.balancer.ActiveConnections()
@@ -52,12 +63,7 @@ func (c *Client) PersistTelemetrySummary(outPath string) (string, error) {
 
 	sum := persistedTelemetrySummary{
 		GeneratedAt: time.Now().Format(time.RFC3339Nano),
-		Domain: func() string {
-			if len(c.cfg.Domains) > 0 {
-				return c.cfg.Domains[0]
-			}
-			return ""
-		}(),
+		Domain:      domain,
 		UploadMTU:      c.syncedUploadMTU,
 		DownloadMTU:    c.syncedDownloadMTU,
 		PacketDup:      c.cfg.PacketDuplicationCount,
@@ -68,6 +74,12 @@ func (c *Client) PersistTelemetrySummary(outPath string) (string, error) {
 		Reserve:        reserveKeys,
 		Telemetry:      c.telemetry.Snapshot(),
 		Adaptation:     c.runtimeControllerSnapshot(),
+		Striping:       func() any {
+			if c.balancer == nil {
+				return nil
+			}
+			return c.balancer.StripingSnapshot()
+		}(),
 	}
 
 	dir := filepath.Dir(outPath)
@@ -97,15 +109,91 @@ func (c *Client) runTelemetryPersistLoop(ctx context.Context) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 
-	livePath := filepath.Join(c.cfg.ConfigDir, "telemetry_live.json")
+	domain := ""
+	if len(c.cfg.Domains) > 0 {
+		domain = c.cfg.Domains[0]
+	}
+	safeDomain := strings.NewReplacer(".", "_", ":", "_", "/", "_", "\\", "_").Replace(domain)
+	liveName := "telemetry_live.json"
+	if safeDomain != "" {
+		liveName = "telemetry_live_" + safeDomain + ".json"
+	}
+	livePath := filepath.Join(c.cfg.ConfigDir, liveName)
+
+	stripingLive := "striping_metrics_live.json"
+	laneHealthLive := "lane_health_live.json"
+	reassemblyLive := "reassembly_integrity_live.json"
+	if safeDomain != "" {
+		stripingLive = "striping_metrics_live_" + safeDomain + ".json"
+		laneHealthLive = "lane_health_live_" + safeDomain + ".json"
+		reassemblyLive = "reassembly_integrity_live_" + safeDomain + ".json"
+	}
+	stripingPath := filepath.Join(c.cfg.ConfigDir, stripingLive)
+	laneHealthPath := filepath.Join(c.cfg.ConfigDir, laneHealthLive)
+	reassemblyPath := filepath.Join(c.cfg.ConfigDir, reassemblyLive)
 
 	for {
 		select {
 		case <-ctx.Done():
 			_, _ = c.PersistTelemetrySummary(livePath)
+			_ = c.persistEvidenceLive(stripingPath, laneHealthPath, reassemblyPath)
 			return
 		case <-t.C:
 			_, _ = c.PersistTelemetrySummary(livePath)
+			_ = c.persistEvidenceLive(stripingPath, laneHealthPath, reassemblyPath)
 		}
 	}
+}
+
+func (c *Client) persistEvidenceLive(stripingPath string, laneHealthPath string, reassemblyPath string) error {
+	if c == nil {
+		return nil
+	}
+
+	writeJSON := func(path string, v any) error {
+		if path == "" || v == nil {
+			return nil
+		}
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		b, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return err
+		}
+		tmp := path + ".tmp"
+		if err := os.WriteFile(tmp, b, 0o644); err != nil {
+			return err
+		}
+		return os.Rename(tmp, path)
+	}
+
+	_ = writeJSON(stripingPath, func() any {
+		if c.balancer == nil {
+			return nil
+		}
+		return c.balancer.StripingSnapshot()
+	}())
+
+	_ = writeJSON(laneHealthPath, map[string]any{
+		"generated_at": time.Now().Format(time.RFC3339Nano),
+		"domain":       func() string { if len(c.cfg.Domains) > 0 { return c.cfg.Domains[0] }; return "" }(),
+		"telemetry":    func() any { if c.telemetry != nil { return c.telemetry.Snapshot() }; return nil }(),
+		"adaptation":   c.runtimeControllerSnapshot(),
+	})
+
+	_ = writeJSON(reassemblyPath, map[string]any{
+		"generated_at": time.Now().Format(time.RFC3339Nano),
+		"domain":       func() string { if len(c.cfg.Domains) > 0 { return c.cfg.Domains[0] }; return "" }(),
+		"useful_delivered_rx": func() uint64 {
+			if c.telemetry == nil {
+				return 0
+			}
+			return c.telemetry.Snapshot().UsefulDeliveredRX
+		}(),
+		"note": "placeholder until ARQ reorder/gap counters are instrumented",
+	})
+
+	return nil
 }

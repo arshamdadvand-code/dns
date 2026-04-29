@@ -21,6 +21,20 @@ import (
 	"masterdnsvpn-go/internal/telemetry"
 )
 
+func minI(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func maxF(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 const (
 	BalancingRoundRobinDefault      = 0
 	BalancingRandom                 = 1
@@ -52,6 +66,17 @@ type balancerStreamRouteState struct {
 	PreferredResolverKey string
 	ResendStreak         int
 	LastFailoverAt       time.Time
+
+	// Multi-lane striping state (true aggregated transport at packet level).
+	// This is per-stream and only applies to stream data-like packets when
+	// requiredCount==1 (i.e. we are not duplicating a packet).
+	LaneKeys   []string
+	LaneDeficit []float64
+	LaneWeight  []float64
+	LastLaneKey string
+
+	// Lightweight distribution stats (evidence artifacts).
+	LaneSent map[string]uint64
 }
 
 type balancerResolverSampleKey struct {
@@ -107,6 +132,40 @@ type Balancer struct {
 	autoDisableTimeoutWindow time.Duration
 	onResolverDisabled       func(*Connection, string)
 	confirmResolverDown      func(*Connection, time.Duration) bool
+}
+
+// StripingSnapshot is a minimal evidence payload for "true multi-lane striping":
+// it reports how stream data packets were distributed across lanes (resolver keys).
+type StripingSnapshot struct {
+	GeneratedAt string                         `json:"generated_at"`
+	Streams     map[uint16]map[string]uint64    `json:"streams"`
+}
+
+func (b *Balancer) StripingSnapshot() StripingSnapshot {
+	out := StripingSnapshot{
+		GeneratedAt: time.Now().Format(time.RFC3339Nano),
+		Streams:     make(map[uint16]map[string]uint64),
+	}
+	if b == nil {
+		return out
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for sid, st := range b.streamRoutes {
+		if st == nil {
+			continue
+		}
+		st.mu.Lock()
+		if len(st.LaneSent) > 0 {
+			m := make(map[string]uint64, len(st.LaneSent))
+			for k, v := range st.LaneSent {
+				m[k] = v
+			}
+			out.Streams[sid] = m
+		}
+		st.mu.Unlock()
+	}
+	return out
 }
 
 func (b *Balancer) SetTelemetry(t *telemetry.RuntimeTelemetry) {
@@ -947,8 +1006,11 @@ func (b *Balancer) NoteStreamProgress(streamID uint16) {
 }
 
 func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCount int) ([]Connection, error) {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
+	// NOTE: We intentionally take a full lock here because stream lane selection
+	// must be able to create per-stream routing state from the first packet.
+	// A read-lock would force a fallback path and break true striping behavior.
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	// 1. Normalize count: 1 <= requiredCount <= len(activeIDs)
 	requiredCount = normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
@@ -956,9 +1018,37 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 		return nil, ErrNoValidConnections
 	}
 
-	// 2. Base case: Single target or non-stream packet is ALWAYS dynamic via balancer
-	if requiredCount == 1 || streamID == 0 || !isBalancerStreamDataLike(packetType) {
+	// 2. Base case: Non-stream packet is ALWAYS dynamic via balancer.
+	// For stream data-like with requiredCount==1, we apply per-stream lane striping
+	// so a single flow can use multiple lanes concurrently (true aggregated transport).
+	if streamID == 0 || !isBalancerStreamDataLike(packetType) {
 		selected := b.getUniqueConnectionsLocked(requiredCount)
+		if len(selected) == 0 {
+			return nil, ErrNoValidConnections
+		}
+		return selected, nil
+	}
+
+	if requiredCount == 1 {
+		state := b.ensureStreamRouteLocked(streamID)
+		if state == nil {
+			selected := b.getUniqueConnectionsLocked(1)
+			if len(selected) == 0 {
+				return nil, ErrNoValidConnections
+			}
+			return selected, nil
+		}
+
+		state.mu.Lock()
+		defer state.mu.Unlock()
+
+		if lane, ok := b.selectStripedLaneLocked(packetType, state); ok {
+			state.LastLaneKey = lane.Key
+			state.LaneSent[lane.Key]++
+			return []Connection{lane}, nil
+		}
+
+		selected := b.getUniqueConnectionsLocked(1)
 		if len(selected) == 0 {
 			return nil, ErrNoValidConnections
 		}
@@ -991,6 +1081,138 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 	}
 
 	return selected, nil
+}
+
+// selectStripedLaneLocked picks one lane for a stream-data-like packet using
+// a small per-stream lane set and a lightweight weighted deficit scheduler.
+// This is intentionally bounded (max 3 lanes) and does not require new protocol
+// packet types; ARQ sequence space already provides correctness/reassembly.
+func (b *Balancer) selectStripedLaneLocked(packetType uint8, state *balancerStreamRouteState) (Connection, bool) {
+	if b == nil || state == nil {
+		return Connection{}, false
+	}
+	if len(b.activeIDs) == 0 {
+		return Connection{}, false
+	}
+
+	// Initialize lane set lazily or refresh when it becomes invalid.
+	if len(state.LaneKeys) == 0 {
+		state.LaneKeys = b.selectInitialLaneSetLocked(3)
+		state.LaneDeficit = make([]float64, len(state.LaneKeys))
+		state.LaneWeight = make([]float64, len(state.LaneKeys))
+	}
+
+	// Refresh weights from live signals (RTT/loss) cheaply.
+	for i, k := range state.LaneKeys {
+		w := b.estimateLaneWeightLocked(k)
+		if w < 0.10 {
+			w = 0.10
+		}
+		if w > 1.50 {
+			w = 1.50
+		}
+		state.LaneWeight[i] = w
+		state.LaneDeficit[i] += w
+	}
+
+	// For RESEND, try to avoid hammering the same lane if alternatives exist.
+	avoidKey := ""
+	if packetType == Enums.PACKET_STREAM_RESEND {
+		avoidKey = state.LastLaneKey
+	}
+
+	bestIdx := -1
+	bestDef := -1.0
+	for i, k := range state.LaneKeys {
+		if avoidKey != "" && k == avoidKey && len(state.LaneKeys) > 1 {
+			continue
+		}
+		if state.LaneDeficit[i] > bestDef {
+			bestDef = state.LaneDeficit[i]
+			bestIdx = i
+		}
+	}
+	if bestIdx < 0 {
+		bestIdx = 0
+	}
+	key := state.LaneKeys[bestIdx]
+	conn, ok := b.connectionByKeyLocked(key)
+	if !ok || conn == nil || !conn.IsValid || conn.Key == "" {
+		return Connection{}, false
+	}
+
+	// Consume one unit from deficit for the chosen lane.
+	state.LaneDeficit[bestIdx] -= 1.0
+	return *conn, true
+}
+
+func (b *Balancer) selectInitialLaneSetLocked(maxLanes int) []string {
+	// Prefer diversity across domains when possible; the key includes domain suffix.
+	if maxLanes < 1 {
+		maxLanes = 1
+	}
+	if maxLanes > 3 {
+		maxLanes = 3
+	}
+
+	// Start from the best pool selection per strategy, but cap and diversify.
+	pool := b.getUniqueConnectionsLocked(minI(len(b.activeIDs), maxLanes*2))
+	seenDomain := map[string]bool{}
+	var out []string
+	for _, c := range pool {
+		if c.Key == "" || !c.IsValid {
+			continue
+		}
+		d := c.Domain
+		if d == "" {
+			d = "default"
+		}
+		if seenDomain[d] && len(out) < maxLanes {
+			continue
+		}
+		seenDomain[d] = true
+		out = append(out, c.Key)
+		if len(out) >= maxLanes {
+			break
+		}
+	}
+
+	// Fallback: just take round-robin from activeIDs.
+	if len(out) == 0 {
+		fb := b.selectRoundRobinLocked(minI(maxLanes, len(b.activeIDs)))
+		for _, c := range fb {
+			if c.Key != "" && c.IsValid {
+				out = append(out, c.Key)
+			}
+		}
+	}
+
+	return out
+}
+
+func (b *Balancer) estimateLaneWeightLocked(key string) float64 {
+	// Cheap weight proxy: prefer lower RTT and lower loss.
+	// Uses connectionStats window snapshots if present.
+	if key == "" {
+		return 1.0
+	}
+	idx, ok := b.indexByKey[key]
+	if !ok || idx < 0 || idx >= len(b.stats) || b.stats[idx] == nil {
+		return 1.0
+	}
+	s := b.stats[idx]
+	sent, _, lost, sum, count := s.snapshot()
+	rtt := float64(50.0) // ms default
+	if count > 0 {
+		rtt = float64(sum/count) / 1000.0 // micros->ms
+	}
+	loss := 0.0
+	if sent > 0 {
+		loss = float64(lost) / float64(sent)
+	}
+	// Weight increases when RTT and loss are lower.
+	w := (1.0 / maxF(1.0, rtt/50.0)) * (1.0 / maxF(1.0, 1.0+loss*5.0))
+	return w
 }
 
 func (b *Balancer) AverageRTT(serverKey string) (time.Duration, bool) {
@@ -1029,7 +1251,9 @@ func (b *Balancer) ensureStreamRouteLocked(streamID uint16) *balancerStreamRoute
 	state := b.streamRoutes[streamID]
 
 	if state == nil {
-		state = &balancerStreamRouteState{}
+		state = &balancerStreamRouteState{
+			LaneSent: make(map[string]uint64),
+		}
 		b.streamRoutes[streamID] = state
 	}
 

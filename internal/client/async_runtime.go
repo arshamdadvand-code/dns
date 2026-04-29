@@ -36,6 +36,13 @@ func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 		return 1
 	}
 
+	// True multi-lane striping uses multiple lanes by distributing sequential
+	// stream data packets across lanes. Duplicating the same packet across
+	// multiple targets would waste bandwidth and hide striping evidence.
+	if (packetType == Enums.PACKET_STREAM_DATA || packetType == Enums.PACKET_STREAM_RESEND) && c.stripingEnabled() {
+		return 1
+	}
+
 	count := c.cfg.PacketDuplicationCount
 	if count < 1 {
 		count = 1

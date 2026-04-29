@@ -53,6 +53,9 @@ func (c *Client) startFullTUIIfInteractive() {
 	if c == nil || c.ui != nil || c.log == nil {
 		return
 	}
+	if !c.tuiEnabled {
+		return
+	}
 	if !canEnableFullTUI(os.Stdout) {
 		return
 	}

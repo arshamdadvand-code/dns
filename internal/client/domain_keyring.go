@@ -16,6 +16,35 @@ type domainKeyringEntry struct {
 	KeyFile          string `json:"key_file"`
 }
 
+// DomainKeyringEntryPublic is an exported view used by cmd/client multi-instance
+// boot logic without exposing internal parsing details.
+type DomainKeyringEntryPublic struct {
+	Domain           string
+	EncryptionMethod int
+	Key              string
+}
+
+// LoadDomainKeyringForMulti is a narrow exported helper used by the multi-instance
+// host in cmd/client to build per-domain client configs.
+func LoadDomainKeyringForMulti(configDir string, path string) ([]DomainKeyringEntryPublic, string, error) {
+	entries, abs, err := loadDomainKeyring(configDir, path)
+	if err != nil {
+		return nil, abs, err
+	}
+	out := make([]DomainKeyringEntryPublic, 0, len(entries))
+	for _, e := range entries {
+		if e.Domain == "" || e.Key == "" {
+			continue
+		}
+		out = append(out, DomainKeyringEntryPublic{
+			Domain:           e.Domain,
+			EncryptionMethod: e.EncryptionMethod,
+			Key:              e.Key,
+		})
+	}
+	return out, abs, nil
+}
+
 func loadDomainKeyring(configDir string, path string) ([]domainKeyringEntry, string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -99,4 +128,3 @@ func (c *Client) codecForDomain(domain string) *security.Codec {
 	}
 	return c.codec
 }
-

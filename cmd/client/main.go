@@ -217,6 +217,7 @@ func main() {
 	resolvedConfigPath := runtimepath.Resolve(opts.configPath)
 
 	var app *client.Client
+	var multi *client.MultiApp
 	switch {
 	case opts.jsonBase64 != "":
 		cfg, err := config.LoadClientConfigFromJSONBase64WithOverrides(opts.jsonBase64, overrides)
@@ -241,6 +242,95 @@ func main() {
 
 	app.PrintBanner()
 
+	// Optional legacy mode: multi-backend SOCKS mux (per-connection sharding).
+	// Default is OFF because the product goal is true multi-lane aggregated transport
+	// inside one logical client session (packet-level striping + ARQ reassembly).
+	//
+	// Enable only when explicitly requested for troubleshooting:
+	// set env var MASTERDNSVPN_MULTIAPP=1
+	if os.Getenv("MASTERDNSVPN_MULTIAPP") == "1" &&
+		len(app.Config().Domains) > 1 &&
+		app.Config().DomainKeyringFile != "" &&
+		app.Config().ProtocolType == "SOCKS5" {
+		base := app.Config()
+
+		entries, _, kerr := client.LoadDomainKeyringForMulti(base.ConfigDir, base.DomainKeyringFile)
+		if kerr != nil {
+			fmt.Fprintf(os.Stderr, "Multi-instance keyring load failed: %v\n", kerr)
+			waitForExitInput()
+			os.Exit(1)
+		}
+
+		// Map domain -> entry
+		byDomain := make(map[string]client.DomainKeyringEntryPublic, len(entries))
+		for _, e := range entries {
+			byDomain[e.Domain] = e
+		}
+
+		backends := make([]*client.Client, 0, len(base.Domains))
+		backendPorts := make([]int, 0, len(base.Domains))
+
+		for i, d := range base.Domains {
+			e, ok := byDomain[d]
+			if !ok || e.Key == "" {
+				fmt.Fprintf(os.Stderr, "Multi-instance missing key for domain: %s\n", d)
+				waitForExitInput()
+				os.Exit(1)
+			}
+
+			cfg2 := base
+			cfg2.Domains = []string{d}
+			cfg2.DomainKeyringFile = "" // per-instance key below
+			cfg2.DataEncryptionMethod = e.EncryptionMethod
+			cfg2.EncryptionKey = e.Key
+
+			cfg2.ListenIP = "127.0.0.1"
+			cfg2.ListenPort = base.ListenPort + 1 + i
+			cfg2.LocalDNSEnabled = false
+
+			// Only the first backend is allowed to spawn the scanner if missing.
+			if i != 0 {
+				cfg2.ScannerSpawn = false
+			}
+
+			b, berr := client.BootstrapLoadedConfig(cfg2, "")
+			if berr != nil {
+				fmt.Fprintf(os.Stderr, "Multi-instance backend bootstrap failed for %s: %v\n", d, berr)
+				waitForExitInput()
+				os.Exit(1)
+			}
+			b.SetTUIEnabled(false)
+			if bl := b.Log(); bl != nil {
+				bl.SetConsoleWriter(io.Discard)
+			}
+			backends = append(backends, b)
+			backendPorts = append(backendPorts, cfg2.ListenPort)
+		}
+
+		m, merr := client.NewMultiApp(client.MultiAppConfig{
+			FrontIP:      base.ListenIP,
+			FrontPort:    base.ListenPort,
+			BackendPorts: backendPorts,
+		}, backends)
+		if merr != nil {
+			fmt.Fprintf(os.Stderr, "Multi-instance init failed: %v\n", merr)
+			waitForExitInput()
+			os.Exit(1)
+		}
+
+		// Use the original app logger for mux-level events.
+		log := app.Log()
+		if log != nil {
+			m.SetLogger(&client.LoggerFacade{
+				Infof:  log.Infof,
+				Warnf:  log.Warnf,
+				Errorf: log.Errorf,
+			})
+		}
+
+		multi = m
+	}
+
 	log := app.Log()
 	if log != nil {
 		log.Infof("\U0001F680 <green>MasterDnsVPN Client Started</green>")
@@ -252,17 +342,33 @@ func main() {
 	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.Run(sigCtx); err != nil {
-		if log != nil {
-			log.Errorf("Runtime error: %v", err)
+	if multi != nil {
+		if err := multi.Run(sigCtx); err != nil {
+			if log != nil {
+				log.Errorf("Runtime error: %v", err)
+			}
+		}
+	} else {
+		if err := app.Run(sigCtx); err != nil {
+			if log != nil {
+				log.Errorf("Runtime error: %v", err)
+			}
 		}
 	}
 
 	// Persist a minimal telemetry snapshot for evidence-based runtime work (v0.1).
-	if p, perr := app.PersistTelemetrySummary(""); perr == nil && p != "" && log != nil {
-		log.Infof("\U0001F4BE <green>Telemetry summary persisted</green> <gray>|</gray> path=<cyan>%s</cyan>", p)
-	} else if perr != nil && log != nil {
-		log.Warnf("<yellow>Telemetry summary persist failed: %v</yellow>", perr)
+	if multi == nil {
+		if p, perr := app.PersistTelemetrySummary(""); perr == nil && p != "" && log != nil {
+			log.Infof("\U0001F4BE <green>Telemetry summary persisted</green> <gray>|</gray> path=<cyan>%s</cyan>", p)
+		} else if perr != nil && log != nil {
+			log.Warnf("<yellow>Telemetry summary persist failed: %v</yellow>", perr)
+		}
+
+		if sp, hp, rp, aerr := app.PersistStripingArtifacts(""); aerr == nil && log != nil {
+			log.Infof("<green>Evidence artifacts persisted</green> striping=<cyan>%s</cyan> lane_health=<cyan>%s</cyan> reassembly=<cyan>%s</cyan>", sp, hp, rp)
+		} else if aerr != nil && log != nil {
+			log.Warnf("<yellow>Evidence artifact persist failed: %v</yellow>", aerr)
+		}
 	}
 
 	if log != nil {

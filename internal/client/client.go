@@ -156,10 +156,21 @@ type Client struct {
 
 	// Full-lifecycle TUI dashboard (tview/tcell).
 	ui *fullTUI
+	tuiEnabled bool
 
 	// Runtime adaptation controller (v0.1).
 	runtimeController        *runtimeController
 	runtimeControllerStarted atomic.Bool
+}
+
+func (c *Client) stripingEnabled() bool {
+	if c == nil {
+		return false
+	}
+	// Enable striping when multiple domains exist and a domain keyring is available.
+	// Control-plane packets are still restricted to the default domain until the
+	// session cookie is established.
+	return len(c.cfg.Domains) > 1 && c.codecByDomain != nil && len(c.codecByDomain) > 1
 }
 
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -255,6 +266,7 @@ func BootstrapLoadedConfig(cfg config.ClientConfig, logPath string) (*Client, er
 	}
 
 	c := New(cfg, log, codec)
+	c.tuiEnabled = true
 	if cfg.DomainKeyringFile != "" {
 		if m, _, err := buildCodecByDomain(cfg.ConfigDir, cfg.DomainKeyringFile); err == nil && len(m) > 0 {
 			c.codecByDomain = m
@@ -273,6 +285,23 @@ func BootstrapLoadedConfig(cfg config.ClientConfig, logPath string) (*Client, er
 		}
 	}
 	return c, nil
+}
+
+// SetTUIEnabled allows embedding the client inside a multi-instance host where
+// only one dashboard is allowed to own the terminal.
+func (c *Client) SetTUIEnabled(enabled bool) {
+	if c == nil {
+		return
+	}
+	c.tuiEnabled = enabled
+}
+
+// Config returns a copy of the loaded config (read-only).
+func (c *Client) Config() config.ClientConfig {
+	if c == nil {
+		return config.ClientConfig{}
+	}
+	return c.cfg
 }
 
 func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Client {
