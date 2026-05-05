@@ -35,12 +35,12 @@ const (
 )
 
 type Client struct {
-	cfg       config.ClientConfig
-	log       *logger.Logger
-	codec     *security.Codec
+	cfg           config.ClientConfig
+	log           *logger.Logger
+	codec         *security.Codec
 	codecByDomain map[string]*security.Codec
-	balancer  *Balancer
-	telemetry *telemetry.RuntimeTelemetry
+	balancer      *Balancer
+	telemetry     *telemetry.RuntimeTelemetry
 
 	successMTUChecks  bool
 	udpBufferPool     sync.Pool
@@ -95,14 +95,20 @@ type Client struct {
 	lastRXDropLogUnix     atomic.Int64
 
 	// Local scanner coordination (optional).
-	scannerOnce         sync.Once
-	scannerHTTP         *http.Client
-	scannerAddr         string
-	scannerClientID     string
-	scannerInstances    []scannerIdentity
-	scannerSpawned      bool
-	scannerStopHB       context.CancelFunc
-	scannerLastDemandAt atomic.Int64
+	scannerOnce          sync.Once
+	scannerHTTP          *http.Client
+	scannerAddr          string
+	scannerClientID      string
+	scannerInstances     []scannerIdentity
+	scannerSpawned       bool
+	scannerStopHB        context.CancelFunc
+	scannerLastDemandAt  atomic.Int64
+	scannerBootstrapMu   sync.RWMutex
+	scannerBootstrapUp   int
+	scannerBootstrapDown int
+	controlLaneMu        sync.RWMutex
+	controlLaneDomain    string
+	controlLaneKey       string
 
 	// Async Runtime Workers & Channels
 	asyncWG              sync.WaitGroup
@@ -155,7 +161,7 @@ type Client struct {
 	telemetryPersistStarted atomic.Bool
 
 	// Full-lifecycle TUI dashboard (tview/tcell).
-	ui *fullTUI
+	ui         *fullTUI
 	tuiEnabled bool
 
 	// Runtime adaptation controller (v0.1).
@@ -470,8 +476,13 @@ func (c *Client) Run(ctx context.Context) error {
 					if c.ui != nil {
 						c.ui.SetPhase("scanner-warm")
 					}
-					up := c.cfg.MinUploadMTU
-					down := c.cfg.MinDownloadMTU
+					up, down := c.scannerBootstrapTargets()
+					if up <= 0 {
+						up = c.cfg.MinUploadMTU
+					}
+					if down <= 0 {
+						down = c.cfg.MinDownloadMTU
+					}
 					if up <= 0 {
 						up = 35
 					}

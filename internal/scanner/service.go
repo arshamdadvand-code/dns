@@ -919,11 +919,21 @@ func (s *Service) ListInstances() map[string]any {
 func safeStr(s string) string { return s }
 
 type warmResp struct {
-	InstanceID string     `json:"instance_id"`
-	Active     []Endpoint `json:"active_ready"`
-	Reserve    []Endpoint `json:"reserve_ready"`
-	ColdKnown  int        `json:"cold_known_count"`
-	Blocked    int        `json:"carrier_blocked_count"`
+	InstanceID                   string     `json:"instance_id"`
+	Active                       []warmEndpoint `json:"active_ready"`
+	Reserve                      []warmEndpoint `json:"reserve_ready"`
+	ColdKnown                    int        `json:"cold_known_count"`
+	Blocked                      int        `json:"carrier_blocked_count"`
+	BootstrapUploadTargetBytes   int        `json:"bootstrap_upload_target_bytes,omitempty"`
+	BootstrapDownloadTargetBytes int        `json:"bootstrap_download_target_bytes,omitempty"`
+}
+
+type warmEndpoint struct {
+	IP                     string  `json:"ip"`
+	Port                   int     `json:"port"`
+	UploadRecommendedBytes int     `json:"upload_recommended_bytes,omitempty"`
+	DownloadRecommendedBytes int   `json:"download_recommended_bytes,omitempty"`
+	Score                  float64 `json:"score,omitempty"`
 }
 
 func (s *Service) GetWarmCandidates(instanceID string) warmResp {
@@ -943,6 +953,8 @@ func (s *Service) GetWarmCandidates(instanceID string) warmResp {
 	}
 	active := make([]scored, 0, 16)
 	reserve := make([]scored, 0, 128)
+	uploadHints := make([]int, 0, 64)
+	downloadHints := make([]int, 0, 64)
 	for _, o := range ov {
 		if o.Bucket == BucketCarrierBlocked {
 			resp.Blocked++
@@ -957,6 +969,10 @@ func (s *Service) GetWarmCandidates(instanceID string) warmResp {
 		if o.LastRTTms > 0 {
 			score -= minFloat(0.30, o.LastRTTms/3000.0)
 		}
+		if o.ProfileComplete && o.UploadRecBytes > 0 && o.DownloadRecBytes > 0 {
+			uploadHints = append(uploadHints, o.UploadRecBytes)
+			downloadHints = append(downloadHints, o.DownloadRecBytes)
+		}
 		item := scored{ep: o.Endpoint, score: score, rtt: o.LastRTTms}
 		if o.Bucket == BucketActiveReady {
 			active = append(active, item)
@@ -969,11 +985,29 @@ func (s *Service) GetWarmCandidates(instanceID string) warmResp {
 	sort.Slice(reserve, func(i, j int) bool { return reserve[i].score > reserve[j].score })
 
 	for i := 0; i < len(active) && i < maxWarmReturn; i++ {
-		resp.Active = append(resp.Active, active[i].ep)
+		epKey := active[i].ep.Key()
+		o := ov[epKey]
+		resp.Active = append(resp.Active, warmEndpoint{
+			IP:                       active[i].ep.IP,
+			Port:                     active[i].ep.Port,
+			UploadRecommendedBytes:   o.UploadRecBytes,
+			DownloadRecommendedBytes: o.DownloadRecBytes,
+			Score:                    active[i].score,
+		})
 	}
 	for i := 0; i < len(reserve) && i < maxWarmReturn; i++ {
-		resp.Reserve = append(resp.Reserve, reserve[i].ep)
+		epKey := reserve[i].ep.Key()
+		o := ov[epKey]
+		resp.Reserve = append(resp.Reserve, warmEndpoint{
+			IP:                       reserve[i].ep.IP,
+			Port:                     reserve[i].ep.Port,
+			UploadRecommendedBytes:   o.UploadRecBytes,
+			DownloadRecommendedBytes: o.DownloadRecBytes,
+			Score:                    reserve[i].score,
+		})
 	}
+	resp.BootstrapUploadTargetBytes = percentileInt(uploadHints, 0.35)
+	resp.BootstrapDownloadTargetBytes = percentileInt(downloadHints, 0.35)
 	return resp
 }
 
@@ -1014,6 +1048,37 @@ func minFloat(a, b float64) float64 {
 		return a
 	}
 	return b
+}
+
+func percentileInt(vals []int, q float64) int {
+	if len(vals) == 0 {
+		return 0
+	}
+	if q <= 0 {
+		q = 0
+	}
+	if q >= 1 {
+		q = 1
+	}
+	cp := append([]int(nil), vals...)
+	sort.Ints(cp)
+	if len(cp) == 1 {
+		return cp[0]
+	}
+	pos := q * float64(len(cp)-1)
+	lo := int(pos)
+	hi := lo
+	if pos > float64(lo) {
+		hi = lo + 1
+	}
+	if hi >= len(cp) {
+		hi = len(cp) - 1
+	}
+	if lo == hi {
+		return cp[lo]
+	}
+	frac := pos - float64(lo)
+	return int(float64(cp[lo])*(1-frac) + float64(cp[hi])*frac)
 }
 
 // Instance identity helpers for operators.

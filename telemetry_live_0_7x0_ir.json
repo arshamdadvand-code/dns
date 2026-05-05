@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-29T15:52:02.6098665-07:00",
+  "generated_at": "2026-04-30T07:56:34.3003319-07:00",
   "domain": "0.7x0.ir",
   "striping_enabled": true,
   "domains_configured": 3,
@@ -34,29 +34,42 @@
     "2.188.167.14|53|2.a5t.ir"
   ],
   "telemetry": {
-    "generated_at": "2026-04-29T15:52:02.6098665-07:00",
-    "elapsed_seconds": 5194.7467763,
-    "wire_bytes_tx": 158734,
-    "wire_bytes_rx": 227214,
-    "useful_ingress_tx": 1091,
-    "useful_acked_tx": 951,
-    "useful_delivered_rx": 4122,
-    "logical_packets": 1543,
-    "targets_requested": 3119,
-    "targets_selected": 3119,
+    "generated_at": "2026-04-30T07:56:34.3003319-07:00",
+    "elapsed_seconds": 63047.9064281,
+    "wire_bytes_tx": 659192,
+    "wire_bytes_rx": 522624,
+    "useful_ingress_tx": 4557,
+    "useful_acked_tx": 4242,
+    "useful_delivered_rx": 5445,
+    "logical_packets": 8428,
+    "targets_requested": 15842,
+    "targets_selected": 15842,
     "resolvers": [
       {
-        "key": "185.23.128.161|53|0.7x0.ir",
-        "ok": 207,
-        "timeout": 61,
+        "key": "2.188.162.74|53|0.7x0.ir",
+        "ok": 949,
+        "timeout": 0,
         "refused": 0,
-        "servfail": 61,
+        "servfail": 0,
         "no_tunnel_answer": 0,
         "other_failures": 0,
         "consecutive_fail": 0,
         "consecutive_timeout": 0,
-        "rtt_p50_ms": 2441.3389835629564,
-        "rtt_p90_ms": 6500.722045512567
+        "rtt_p50_ms": 377.76185720308985,
+        "rtt_p90_ms": 2385.9137836162536
+      },
+      {
+        "key": "185.23.128.161|53|0.7x0.ir",
+        "ok": 226,
+        "timeout": 87,
+        "refused": 0,
+        "servfail": 87,
+        "no_tunnel_answer": 0,
+        "other_failures": 0,
+        "consecutive_fail": 8,
+        "consecutive_timeout": 4,
+        "rtt_p50_ms": 2523.827342926133,
+        "rtt_p90_ms": 6589.384995782833
       },
       {
         "key": "78.157.45.240|53|1.7a8.ir",
@@ -72,8 +85,8 @@
         "rtt_p90_ms": 9997.862269414694
       },
       {
-        "key": "2.188.162.74|53|0.7x0.ir",
-        "ok": 105,
+        "key": "5.160.242.48|53|1.7a8.ir",
+        "ok": 115,
         "timeout": 0,
         "refused": 0,
         "servfail": 0,
@@ -81,8 +94,8 @@
         "other_failures": 0,
         "consecutive_fail": 0,
         "consecutive_timeout": 0,
-        "rtt_p50_ms": 368.4035194348381,
-        "rtt_p90_ms": 2399.6154398427952
+        "rtt_p50_ms": 253.3621035740505,
+        "rtt_p90_ms": 280.3696939385786
       },
       {
         "key": "78.38.30.69|53|0.7x0.ir",
@@ -111,6 +124,19 @@
         "rtt_p90_ms": 5377.650324113673
       },
       {
+        "key": "188.213.65.54|53|1.7a8.ir",
+        "ok": 75,
+        "timeout": 0,
+        "refused": 0,
+        "servfail": 0,
+        "no_tunnel_answer": 0,
+        "other_failures": 0,
+        "consecutive_fail": 0,
+        "consecutive_timeout": 0,
+        "rtt_p50_ms": 1136.0091905456711,
+        "rtt_p90_ms": 1351.3584272176627
+      },
+      {
         "key": "86.104.244.241|53|0.7x0.ir",
         "ok": 9,
         "timeout": 10,
@@ -122,19 +148,6 @@
         "consecutive_timeout": 0,
         "rtt_p50_ms": 3006.1480895061727,
         "rtt_p90_ms": 3648.1227608024687
-      },
-      {
-        "key": "188.213.65.54|53|1.7a8.ir",
-        "ok": 4,
-        "timeout": 0,
-        "refused": 0,
-        "servfail": 0,
-        "no_tunnel_answer": 0,
-        "other_failures": 0,
-        "consecutive_fail": 0,
-        "consecutive_timeout": 0,
-        "rtt_p50_ms": 323.562,
-        "rtt_p90_ms": 4226.169
       },
       {
         "key": "37.202.187.211|53|1.7a8.ir",
@@ -208,8 +221,8 @@
         "refused": 0,
         "servfail": 0,
         "no_tunnel_answer": 0,
-        "other_failures": 0,
-        "consecutive_fail": 0,
+        "other_failures": 1,
+        "consecutive_fail": 1,
         "consecutive_timeout": 0,
         "rtt_p50_ms": 0,
         "rtt_p90_ms": 0
@@ -254,7 +267,7 @@
         "rtt_p90_ms": 0
       },
       {
-        "key": "5.160.242.48|53|1.7a8.ir",
+        "key": "5.160.242.48:53",
         "ok": 0,
         "timeout": 0,
         "refused": 0,
@@ -401,7 +414,7 @@
     "duplication_setup": 4,
     "failover_threshold": 5,
     "failover_cooldown_seconds": 15,
-    "active_set_health": 0.4892857142857144,
+    "active_set_health": 0.4500000000000001,
     "throughput_efficiency": 0,
     "target_pressure_down": true,
     "target_pressure_up": false,
@@ -412,7 +425,7 @@
     "tail_inflation": 1
   },
   "striping_metrics": {
-    "generated_at": "2026-04-29T15:52:02.6098665-07:00",
+    "generated_at": "2026-04-30T07:56:34.3003319-07:00",
     "streams": {}
   }
 }

@@ -1,6 +1,6 @@
 {
   "domain": "0.7x0.ir",
-  "generated_at": "2026-04-29T15:52:02.6118717-07:00",
+  "generated_at": "2026-04-30T07:56:34.3024737-07:00",
   "note": "placeholder until ARQ reorder/gap counters are instrumented",
-  "useful_delivered_rx": 4122
+  "useful_delivered_rx": 5445
 }

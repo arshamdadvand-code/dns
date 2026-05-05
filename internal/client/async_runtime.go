@@ -36,6 +36,10 @@ func (c *Client) runtimePacketDuplicationCount(packetType uint8) int {
 		return 1
 	}
 
+	if c.stripingEnabled() && isStreamControlLanePacketType(packetType) {
+		return 1
+	}
+
 	// True multi-lane striping uses multiple lanes by distributing sequential
 	// stream data packets across lanes. Duplicating the same packet across
 	// multiple targets would waste bandwidth and hide striping evidence.
@@ -529,10 +533,6 @@ func (c *Client) closeTunnelSockets() {
 func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F9E9 <green>Planner/Encoder Worker <cyan>#%d</cyan> started</green>", id)
-	defaultDomain := ""
-	if len(c.cfg.Domains) > 0 {
-		defaultDomain = c.cfg.Domains[0]
-	}
 
 	var packetByDomain map[string][]byte
 	var preparedDomainByName map[string]preparedTunnelDomain
@@ -557,9 +557,25 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 				err   error
 			)
 
-			conns, err = c.balancer.SelectTargets(task.opts.PacketType, task.opts.StreamID, targetCount)
-			if err != nil {
-				conns = nil
+			controlDomain, controlKey := c.controlLane()
+			if controlDomain == "" && len(c.cfg.Domains) > 0 {
+				controlDomain = c.cfg.Domains[0]
+			}
+
+			if isControlPlanePacketType(task.opts.PacketType) || (c.stripingEnabled() && isStreamControlLanePacketType(task.opts.PacketType)) {
+				if conn, pickErr := c.balancer.SelectControlTarget(controlKey, controlDomain); pickErr == nil {
+					conns = []Connection{conn}
+				} else {
+					conns, err = c.balancer.SelectTargets(task.opts.PacketType, task.opts.StreamID, 1)
+					if err != nil {
+						conns = nil
+					}
+				}
+			} else {
+				conns, err = c.balancer.SelectTargets(task.opts.PacketType, task.opts.StreamID, targetCount)
+				if err != nil {
+					conns = nil
+				}
 			}
 			if c.telemetry != nil {
 				c.telemetry.NoteDuplicationSelection(targetCount, len(conns))
@@ -570,7 +586,7 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 				continue
 			}
 
-			frames, err = c.buildPlannedOutboundFrames(task, conns, defaultDomain, packetByDomain, preparedDomainByName, frames)
+			frames, err = c.buildPlannedOutboundFrames(task, conns, controlDomain, controlKey, packetByDomain, preparedDomainByName, frames)
 			if err != nil {
 				if !task.wasPacked && task.selected != nil {
 					task.selected.ReleaseTXPacket(task.item)
@@ -682,7 +698,8 @@ func (c *Client) waitForWriterCapacity(ctx context.Context, task plannerTask, fr
 func (c *Client) buildPlannedOutboundFrames(
 	task plannerTask,
 	conns []Connection,
-	defaultDomain string,
+	controlDomain string,
+	controlKey string,
 	packetByDomain map[string][]byte,
 	preparedDomainByName map[string]preparedTunnelDomain,
 	frames []encodedOutboundDatagram,
@@ -703,10 +720,16 @@ func (c *Client) buildPlannedOutboundFrames(
 	for _, resolverConn := range conns {
 		domain := resolverConn.Domain
 		if domain == "" {
-			domain = defaultDomain
+			domain = controlDomain
 		}
-		if controlOnly && domain != defaultDomain {
-			continue
+		if controlOnly {
+			if controlKey != "" {
+				if resolverConn.Key != controlKey {
+					continue
+				}
+			} else if controlDomain != "" && domain != controlDomain {
+				continue
+			}
 		}
 
 		addr, err := c.getResolverUDPAddr(resolverConn)
@@ -771,6 +794,19 @@ func isControlPlanePacketType(packetType uint8) bool {
 		Enums.PACKET_MTU_DOWN_REQ,
 		Enums.PACKET_PING,
 		Enums.PACKET_SESSION_CLOSE:
+		return true
+	default:
+		return false
+	}
+}
+
+func isStreamControlLanePacketType(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_SYN,
+		Enums.PACKET_SOCKS5_SYN,
+		Enums.PACKET_STREAM_CLOSE_READ,
+		Enums.PACKET_STREAM_CLOSE_WRITE,
+		Enums.PACKET_STREAM_RST:
 		return true
 	default:
 		return false

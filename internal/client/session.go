@@ -113,6 +113,8 @@ waitPhase:
 			responsesReceived++
 			if res.err == nil {
 				if err := c.applySessionInitPacket(res.packet, initPayload, verifyCode); err == nil {
+					c.setControlLane(conn.Domain, conn.Key)
+					c.narrowStartupActiveSetToControlLane(conn.Key)
 					cancel()
 					return nil
 				} else if errors.Is(err, ErrSessionInitBusy) {
@@ -395,6 +397,18 @@ func (c *Client) nextSessionInitAttempt() (Connection, []byte, [4]byte, error) {
 		return Connection{}, nil, empty, ErrNoValidConnections
 	}
 
+	_, preferredKey := c.controlLane()
+	if preferredKey != "" {
+		for _, conn := range active {
+			if !conn.IsValid || conn.Key == "" {
+				continue
+			}
+			if conn.Key == preferredKey {
+				return conn, c.sessionInitPayload, c.sessionInitVerify, nil
+			}
+		}
+	}
+
 	// Use the cursor to rotate between valid resolvers in a Round-Robin fashion.
 	validLen := len(active)
 	start := c.sessionInitCursor
@@ -464,6 +478,43 @@ func (c *Client) buildTunnelQuery(domain string, sessionID uint8, packetType uin
 		PacketType: packetType,
 		Payload:    payload,
 	})
+}
+
+func (c *Client) setControlLane(domain string, key string) {
+	if c == nil {
+		return
+	}
+	c.controlLaneMu.Lock()
+	c.controlLaneDomain = domain
+	c.controlLaneKey = key
+	c.controlLaneMu.Unlock()
+}
+
+func (c *Client) controlLane() (domain string, key string) {
+	if c == nil {
+		return "", ""
+	}
+	c.controlLaneMu.RLock()
+	defer c.controlLaneMu.RUnlock()
+	return c.controlLaneDomain, c.controlLaneKey
+}
+
+func (c *Client) narrowStartupActiveSetToControlLane(controlKey string) {
+	if c == nil || c.balancer == nil || controlKey == "" {
+		return
+	}
+
+	active := c.balancer.ActiveConnections()
+	for _, conn := range active {
+		if conn.Key == "" || conn.Key == controlKey {
+			continue
+		}
+		_ = c.balancer.SetConnectionValidityWithLog(conn.Key, false, false)
+	}
+
+	if c.ui != nil {
+		c.ui.AddSystemEvent("ADMIT", fmt.Sprintf("startup_narrow control=%s active=%d", controlKey, len(c.balancer.ActiveConnections())))
+	}
 }
 
 func (c *Client) clearSessionResetPending() {
@@ -580,6 +631,14 @@ func (c *Client) applySyncedMTUState(uploadMTU int, downloadMTU int, uploadChars
 	c.safeUploadMTU = computeSafeUploadMTU(uploadMTU, c.mtuCryptoOverhead)
 	c.maxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(uploadMTU, 80, c.cfg.MaxPacketsPerBatch)
 	c.applySessionCompressionPolicy()
+	if c.balancer != nil {
+		for _, conn := range c.balancer.AllConnections() {
+			if conn.Key == "" {
+				continue
+			}
+			_ = c.balancer.SetConnectionMTU(conn.Key, uploadMTU, uploadChars, downloadMTU)
+		}
+	}
 	if c.log != nil && c.successMTUChecks {
 		c.log.Infof("\U0001F4CF <green>MTU state applied: UP=%d, DOWN=%d</green>", uploadMTU, downloadMTU)
 	}

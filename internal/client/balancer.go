@@ -45,6 +45,8 @@ const (
 	BalancingLossThenLatency        = 6
 	BalancingLeastLossTopRandom     = 7
 	BalancingLeastLossTopRoundRobin = 8
+	stripingWarmupPackets           = 256
+	stripingSecondLanePackets       = 512
 )
 
 type Connection struct {
@@ -66,14 +68,15 @@ type balancerStreamRouteState struct {
 	PreferredResolverKey string
 	ResendStreak         int
 	LastFailoverAt       time.Time
+	DataPacketsSent      uint64
 
 	// Multi-lane striping state (true aggregated transport at packet level).
 	// This is per-stream and only applies to stream data-like packets when
 	// requiredCount==1 (i.e. we are not duplicating a packet).
-	LaneKeys   []string
-	LaneDeficit []float64
-	LaneWeight  []float64
-	LastLaneKey string
+	LaneKeys        []string
+	LaneDeficit     []float64
+	LaneWeight      []float64
+	LastLaneKey     string
 	LaneRefreshedAt time.Time
 
 	// Lightweight distribution stats (evidence artifacts).
@@ -146,8 +149,8 @@ type recentStripingEntry struct {
 // StripingSnapshot is a minimal evidence payload for "true multi-lane striping":
 // it reports how stream data packets were distributed across lanes (resolver keys).
 type StripingSnapshot struct {
-	GeneratedAt string                         `json:"generated_at"`
-	Streams     map[uint16]map[string]uint64    `json:"streams"`
+	GeneratedAt string                       `json:"generated_at"`
+	Streams     map[uint16]map[string]uint64 `json:"streams"`
 }
 
 func (b *Balancer) StripingSnapshot() StripingSnapshot {
@@ -245,6 +248,33 @@ func (b *Balancer) SetStreamFailoverConfig(threshold int, cooldown time.Duration
 	b.streamFailoverThreshold = threshold
 	b.streamFailoverCooldown = cooldown
 	b.mu.Unlock()
+}
+
+func (b *Balancer) SelectControlTarget(preferredKey string, preferredDomain string) (Connection, error) {
+	if b == nil {
+		return Connection{}, ErrNoValidConnections
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if preferredKey != "" {
+		if conn, ok := b.connectionByKeyLocked(preferredKey); ok && conn != nil && conn.IsValid && conn.Key != "" {
+			return *conn, nil
+		}
+	}
+
+	if preferredDomain != "" {
+		if conn, ok := b.bestActiveConnectionForDomainLocked(preferredDomain); ok {
+			return conn, nil
+		}
+	}
+
+	selected := b.getUniqueConnectionsLocked(1)
+	if len(selected) == 0 {
+		return Connection{}, ErrNoValidConnections
+	}
+	return selected[0], nil
 }
 
 func (b *Balancer) SetAutoDisableConfig(enabled bool, window time.Duration) {
@@ -1081,9 +1111,23 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 		state.mu.Lock()
 		defer state.mu.Unlock()
 
+		if b.shouldWarmSingleLaneLocked(packetType, state) {
+			if preferred, ok := b.selectWarmSingleLanePreferredLocked(state); ok {
+				state.LastLaneKey = preferred.Key
+				state.LaneSent[preferred.Key]++
+				if packetType == Enums.PACKET_STREAM_DATA {
+					state.DataPacketsSent++
+				}
+				return []Connection{preferred}, nil
+			}
+		}
+
 		if lane, ok := b.selectStripedLaneLocked(packetType, state); ok {
 			state.LastLaneKey = lane.Key
 			state.LaneSent[lane.Key]++
+			if packetType == Enums.PACKET_STREAM_DATA {
+				state.DataPacketsSent++
+			}
 			return []Connection{lane}, nil
 		}
 
@@ -1120,6 +1164,9 @@ func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCoun
 		state.LaneSent = make(map[string]uint64)
 	}
 	state.LaneSent[preferred.Key]++
+	if packetType == Enums.PACKET_STREAM_DATA {
+		state.DataPacketsSent++
+	}
 
 	// Combine Preferred + Dynamic Others
 	selected := make([]Connection, 0, requiredCount)
@@ -1145,9 +1192,11 @@ func (b *Balancer) selectStripedLaneLocked(packetType uint8, state *balancerStre
 		return Connection{}, false
 	}
 
+	maxLanes := b.targetStripingLaneCountLocked(packetType, state)
+
 	// Initialize lane set lazily or refresh when it becomes invalid.
-	if b.shouldRefreshLaneSetLocked(state, 3) {
-		state.LaneKeys = b.selectInitialLaneSetLocked(3)
+	if b.shouldRefreshLaneSetLocked(state, maxLanes) {
+		state.LaneKeys = b.selectInitialLaneSetLocked(maxLanes)
 		state.LaneDeficit = make([]float64, len(state.LaneKeys))
 		state.LaneWeight = make([]float64, len(state.LaneKeys))
 		state.LaneRefreshedAt = time.Now()
@@ -1195,6 +1244,68 @@ func (b *Balancer) selectStripedLaneLocked(packetType uint8, state *balancerStre
 	// Consume one unit from deficit for the chosen lane.
 	state.LaneDeficit[bestIdx] -= 1.0
 	return *conn, true
+}
+
+func (b *Balancer) shouldWarmSingleLaneLocked(packetType uint8, state *balancerStreamRouteState) bool {
+	if b == nil || state == nil {
+		return false
+	}
+	if packetType != Enums.PACKET_STREAM_DATA && packetType != Enums.PACKET_STREAM_RESEND {
+		return false
+	}
+	return state.DataPacketsSent < stripingWarmupPackets
+}
+
+func (b *Balancer) selectWarmSingleLanePreferredLocked(state *balancerStreamRouteState) (Connection, bool) {
+	if state == nil {
+		return Connection{}, false
+	}
+	if current, ok := b.validPreferredConnectionLocked(state); ok {
+		return current, true
+	}
+	var replacement Connection
+	var ok bool
+	if state.PreferredResolverKey == "" {
+		replacement, ok = b.bootstrapPreferredConnectionLocked()
+	} else {
+		replacement, ok = b.selectAlternateConnectionLocked(state.PreferredResolverKey)
+	}
+	if ok {
+		state.PreferredResolverKey = replacement.Key
+		state.ResendStreak = 0
+		return replacement, true
+	}
+	return Connection{}, false
+}
+
+func (b *Balancer) bootstrapPreferredConnectionLocked() (Connection, bool) {
+	if b == nil || len(b.activeIDs) == 0 {
+		return Connection{}, false
+	}
+	scorer, hasSignal := b.strategyScorerLocked()
+	if scorer != nil && hasSignal {
+		if best, ok := b.bestScoredConnectionLocked(scorer); ok {
+			return best, true
+		}
+	}
+	idx := b.activeIDs[0]
+	if idx < 0 || idx >= len(b.connections) {
+		return Connection{}, false
+	}
+	return b.connections[idx], true
+}
+
+func (b *Balancer) targetStripingLaneCountLocked(packetType uint8, state *balancerStreamRouteState) int {
+	if b == nil || state == nil {
+		return 1
+	}
+	if packetType != Enums.PACKET_STREAM_DATA && packetType != Enums.PACKET_STREAM_RESEND {
+		return 3
+	}
+	if state.DataPacketsSent < stripingSecondLanePackets {
+		return 2
+	}
+	return 3
 }
 
 func (b *Balancer) selectInitialLaneSetLocked(maxLanes int) []string {
@@ -1428,6 +1539,37 @@ func (b *Balancer) validPreferredConnectionLocked(state *balancerStreamRouteStat
 		return Connection{}, false
 	}
 	return *conn, true
+}
+
+func (b *Balancer) bestActiveConnectionForDomainLocked(domain string) (Connection, bool) {
+	if b == nil || domain == "" || len(b.activeIDs) == 0 {
+		return Connection{}, false
+	}
+
+	scorer, hasSignal := b.strategyScorerLocked()
+	bestIdx := -1
+	bestScore := -1e9
+	for _, idx := range b.activeIDs {
+		if idx < 0 || idx >= len(b.connections) {
+			continue
+		}
+		conn := b.connections[idx]
+		if !conn.IsValid || conn.Key == "" || conn.Domain != domain {
+			continue
+		}
+		score := 0.0
+		if scorer != nil && hasSignal {
+			score = float64(scorer(idx))
+		}
+		if bestIdx < 0 || score > bestScore {
+			bestIdx = idx
+			bestScore = score
+		}
+	}
+	if bestIdx < 0 {
+		return Connection{}, false
+	}
+	return b.connections[bestIdx], true
 }
 
 func (b *Balancer) selectAlternateConnectionLocked(excludeKey string) (Connection, bool) {

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,6 +37,14 @@ type scannerWarmResp struct {
 		IP   string `json:"ip"`
 		Port int    `json:"port"`
 	} `json:"reserve_ready"`
+	BootstrapUploadTargetBytes   int `json:"bootstrap_upload_target_bytes"`
+	BootstrapDownloadTargetBytes int `json:"bootstrap_download_target_bytes"`
+}
+
+type scannerWarmCandidate struct {
+	Domain string
+	IP     string
+	Port   int
 }
 
 func (c *Client) ensureScannerOnce(ctx context.Context) {
@@ -303,6 +312,9 @@ func (c *Client) scannerWarmStartAll(ctx context.Context) bool {
 
 	activeByDomain := make(map[string][]config.ResolverAddress, 8)
 	reserveByDomain := make(map[string][]config.ResolverAddress, 8)
+	candidatesByDomain := make(map[string][]scannerWarmCandidate, 8)
+	uploadHints := make([]int, 0, len(c.scannerInstances))
+	downloadHints := make([]int, 0, len(c.scannerInstances))
 	okAny := false
 
 	for _, id := range c.scannerInstances {
@@ -348,14 +360,51 @@ func (c *Client) scannerWarmStartAll(ctx context.Context) bool {
 		okAny = true
 		activeByDomain[id.Domain] = a
 		reserveByDomain[id.Domain] = r
+		combined := make([]scannerWarmCandidate, 0, len(a)+len(r))
+		for _, ep := range a {
+			combined = append(combined, scannerWarmCandidate{Domain: id.Domain, IP: ep.IP, Port: ep.Port})
+		}
+		for _, ep := range r {
+			combined = append(combined, scannerWarmCandidate{Domain: id.Domain, IP: ep.IP, Port: ep.Port})
+		}
+		candidatesByDomain[id.Domain] = combined
+		if wr.BootstrapUploadTargetBytes > 0 {
+			uploadHints = append(uploadHints, wr.BootstrapUploadTargetBytes)
+		}
+		if wr.BootstrapDownloadTargetBytes > 0 {
+			downloadHints = append(downloadHints, wr.BootstrapDownloadTargetBytes)
+		}
 	}
 
 	if !okAny {
 		return false
 	}
 
+	bootstrapUp := percentileInt(uploadHints, 0.35)
+	bootstrapDown := percentileInt(downloadHints, 0.35)
+	c.setScannerBootstrapTargets(bootstrapUp, bootstrapDown)
 	c.overrideConnectionsFromScanner(activeByDomain, reserveByDomain, "scanner_warm_multi")
+	c.activateScannerStartupSubset(ctx, candidatesByDomain, bootstrapUp, bootstrapDown)
 	return true
+}
+
+func (c *Client) setScannerBootstrapTargets(upload, download int) {
+	if c == nil {
+		return
+	}
+	c.scannerBootstrapMu.Lock()
+	c.scannerBootstrapUp = upload
+	c.scannerBootstrapDown = download
+	c.scannerBootstrapMu.Unlock()
+}
+
+func (c *Client) scannerBootstrapTargets() (int, int) {
+	if c == nil {
+		return 0, 0
+	}
+	c.scannerBootstrapMu.RLock()
+	defer c.scannerBootstrapMu.RUnlock()
+	return c.scannerBootstrapUp, c.scannerBootstrapDown
 }
 
 func (c *Client) overrideConnectionsFromScanner(activeByDomain map[string][]config.ResolverAddress, reserveByDomain map[string][]config.ResolverAddress, source string) {
@@ -365,9 +414,8 @@ func (c *Client) overrideConnectionsFromScanner(activeByDomain map[string][]conf
 
 	indexByKey := make(map[string]struct{}, 2048)
 	connections := make([]Connection, 0, 2048)
-	activeKeys := make(map[string]struct{}, 512)
 
-	add := func(domain string, r config.ResolverAddress, isActive bool) {
+	add := func(domain string, r config.ResolverAddress) {
 		if domain == "" || r.IP == "" || r.Port < 1 {
 			return
 		}
@@ -376,9 +424,6 @@ func (c *Client) overrideConnectionsFromScanner(activeByDomain map[string][]conf
 			return
 		}
 		indexByKey[key] = struct{}{}
-		if isActive {
-			activeKeys[key] = struct{}{}
-		}
 		label := formatResolverEndpoint(r.IP, r.Port)
 		connections = append(connections, Connection{
 			Domain:        domain,
@@ -398,14 +443,57 @@ func (c *Client) overrideConnectionsFromScanner(activeByDomain map[string][]conf
 		}
 	}
 
-	for domain, rs := range activeByDomain {
-		for _, r := range rs {
-			add(domain, r, true)
+	orderedDomains := make([]string, 0, len(activeByDomain)+len(reserveByDomain))
+	seenDomains := make(map[string]struct{}, len(activeByDomain)+len(reserveByDomain))
+	for _, id := range c.scannerInstances {
+		if id.Domain == "" {
+			continue
+		}
+		if _, ok := activeByDomain[id.Domain]; ok {
+			if _, seen := seenDomains[id.Domain]; !seen {
+				orderedDomains = append(orderedDomains, id.Domain)
+				seenDomains[id.Domain] = struct{}{}
+			}
+		}
+		if _, ok := reserveByDomain[id.Domain]; ok {
+			if _, seen := seenDomains[id.Domain]; !seen {
+				orderedDomains = append(orderedDomains, id.Domain)
+				seenDomains[id.Domain] = struct{}{}
+			}
 		}
 	}
-	for domain, rs := range reserveByDomain {
+	for domain := range activeByDomain {
+		if _, seen := seenDomains[domain]; !seen {
+			orderedDomains = append(orderedDomains, domain)
+			seenDomains[domain] = struct{}{}
+		}
+	}
+	for domain := range reserveByDomain {
+		if _, seen := seenDomains[domain]; !seen {
+			orderedDomains = append(orderedDomains, domain)
+			seenDomains[domain] = struct{}{}
+		}
+	}
+	knownPrefix := len(orderedDomains)
+	if knownPrefix > len(c.scannerInstances) {
+		knownPrefix = len(c.scannerInstances)
+	}
+	if knownPrefix < len(orderedDomains) {
+		tail := append([]string(nil), orderedDomains[knownPrefix:]...)
+		sort.Strings(tail)
+		copy(orderedDomains[knownPrefix:], tail)
+	}
+
+	for _, domain := range orderedDomains {
+		rs := activeByDomain[domain]
 		for _, r := range rs {
-			add(domain, r, false)
+			add(domain, r)
+		}
+	}
+	for _, domain := range orderedDomains {
+		rs := reserveByDomain[domain]
+		for _, r := range rs {
+			add(domain, r)
 		}
 	}
 
@@ -416,17 +504,115 @@ func (c *Client) overrideConnectionsFromScanner(activeByDomain map[string][]conf
 	c.balancer.SetConnections(pointers)
 
 	for _, conn := range connections {
-		// Active-ready becomes Balancer active; reserve-ready stays inactive until promoted.
-		if _, ok := activeKeys[conn.Key]; ok {
-			c.balancer.SetConnectionValidity(conn.Key, true)
-		} else {
-			// Leave inactive; seed conservative stats so initial selection penalizes it if it becomes active later.
-			c.balancer.SeedConservativeStats(conn.Key)
-		}
+		// Scanner inventory is separate from runtime admission.
+		c.balancer.SeedConservativeStats(conn.Key)
 	}
 
 	if c.ui != nil {
 		c.ui.AddSystemEvent("SCAN", fmt.Sprintf("scanner_inventory_apply source=%s domains=%d conns=%d", source, len(activeByDomain), len(connections)))
+	}
+}
+
+func (c *Client) activateScannerStartupSubset(ctx context.Context, candidatesByDomain map[string][]scannerWarmCandidate, bootstrapUp int, bootstrapDown int) {
+	if c == nil || c.balancer == nil || len(c.scannerInstances) == 0 {
+		return
+	}
+
+	type domainParams struct {
+		method int
+		key    string
+	}
+	entries, _, _ := loadDomainKeyring(c.cfg.ConfigDir, c.cfg.DomainKeyringFile)
+	paramsByDomain := make(map[string]domainParams, len(c.scannerInstances))
+	for _, id := range c.scannerInstances {
+		paramsByDomain[id.Domain] = domainParams{
+			method: id.EncryptionMethod,
+			key:    strings.TrimSpace(c.cfg.EncryptionKey),
+		}
+	}
+	for _, e := range entries {
+		if e.Domain == "" {
+			continue
+		}
+		p := paramsByDomain[e.Domain]
+		if e.EncryptionMethod >= 0 && e.EncryptionMethod <= 5 {
+			p.method = e.EncryptionMethod
+		}
+		if e.Key != "" {
+			p.key = e.Key
+		} else if e.KeyFile != "" {
+			pth := e.KeyFile
+			if !filepath.IsAbs(pth) && c.cfg.ConfigDir != "" {
+				pth = filepath.Join(c.cfg.ConfigDir, pth)
+			}
+			if b, err := os.ReadFile(pth); err == nil {
+				p.key = strings.TrimSpace(string(b))
+			}
+		}
+		paramsByDomain[e.Domain] = p
+	}
+
+	const (
+		startupPerDomain = 1
+		startupMaxTotal  = 3
+		startupTimeout   = 4 * time.Second
+	)
+	admittedTotal := 0
+	bestHintKey := ""
+	bestHintDomain := ""
+	bestHintRTT := time.Duration(0)
+	for _, id := range c.scannerInstances {
+		if admittedTotal >= startupMaxTotal {
+			break
+		}
+		cands := candidatesByDomain[id.Domain]
+		if len(cands) == 0 {
+			continue
+		}
+		params := paramsByDomain[id.Domain]
+		if params.key == "" {
+			continue
+		}
+		prober, err := NewStage0Prober(id.Domain, params.method, params.key)
+		if err != nil {
+			continue
+		}
+		admittedForDomain := 0
+		for _, cand := range cands {
+			if admittedForDomain >= startupPerDomain || admittedTotal >= startupMaxTotal {
+				break
+			}
+			res, err := prober.Probe(ctx, cand.IP, cand.Port, startupTimeout)
+			if err != nil || !res.OK {
+				continue
+			}
+			up := bootstrapUp
+			down := bootstrapDown
+			if up <= 0 {
+				up = max(c.cfg.MinUploadMTU, 35)
+			}
+			if down <= 0 {
+				down = max(c.cfg.MinDownloadMTU, 100)
+			}
+			key := makeConnectionKey(cand.IP, cand.Port, cand.Domain)
+			_ = c.balancer.SetConnectionMTU(key, up, c.encodedCharsForPayload(up), down)
+			if c.balancer.SetConnectionValidityWithLog(key, true, true) {
+				admittedForDomain++
+				admittedTotal++
+				rtt := time.Duration(res.RTTms * float64(time.Millisecond))
+				if bestHintKey == "" || rtt <= 0 || bestHintRTT == 0 || rtt < bestHintRTT {
+					bestHintKey = key
+					bestHintDomain = cand.Domain
+					bestHintRTT = rtt
+				}
+				if c.ui != nil {
+					c.ui.AddSystemEvent("ADMIT", fmt.Sprintf("startup_admit domain=%s resolver=%s:%d up=%d down=%d", cand.Domain, cand.IP, cand.Port, up, down))
+				}
+			}
+		}
+	}
+	if bestHintKey != "" {
+		c.setControlLane(bestHintDomain, bestHintKey)
 	}
 }
 
